@@ -117,13 +117,15 @@ class IpmiConfig:
 
 @dataclass
 class CollectorConfig:
-    interval_seconds: int = 60
+    interval_seconds: int = 5
     # An interval longer than this is treated as downtime: energy is not
     # extrapolated across the gap, it is recorded as a gap marker instead.
     max_gap_seconds: int = 900
     # Readings outside this band are discarded as BMC glitches.
     min_watts: float = 1.0
     max_watts: float = 10000.0
+    # If set, samples older than this many days are automatically purged.
+    retention_days: Optional[int] = 90
 
 
 @dataclass
@@ -219,6 +221,8 @@ class Config:
             problems.append(
                 "缺口阈值 collector.max_gap_seconds 必须大于采集间隔 collector.interval_seconds"
             )
+        if self.collector.retention_days is not None and self.collector.retention_days < 7:
+            problems.append("保留天数 collector.retention_days 必须 >= 7 或设为 null（不限制）")
         if self.tariff.mode not in ("flat", "tou"):
             problems.append("电价模式 tariff.mode 必须是 'flat' 或 'tou'")
         if self.tariff.mode == "tou":

@@ -96,15 +96,26 @@ class Collector:
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         interval = self.config.collector.interval_seconds
+        retention = self.config.collector.retention_days
         self.storage.log_event(
             "collector_start",
-            f"interval={interval}s db={self.config.db_path}",
+            f"interval={interval}s retention={retention}d db={self.config.db_path}",
         )
+        last_purge = dt.datetime.now()
         # Align to the interval boundary so samples land on tidy timestamps
         # and hourly buckets get even coverage.
         while not self._stop:
             started = time.time()
             self.sample_once()
+
+            # Purge old samples once a day if retention is configured.
+            if retention and (dt.datetime.now() - last_purge).days >= 1:
+                cutoff = dt.datetime.now() - dt.timedelta(days=retention)
+                deleted = self.storage.purge_before(cutoff)
+                if deleted:
+                    self.storage.log_event("purge", f"deleted {deleted} samples older than {retention}d")
+                last_purge = dt.datetime.now()
+
             elapsed = time.time() - started
             sleep_for = max(1.0, interval - elapsed)
             # Sleep in slices so SIGTERM is honoured promptly.

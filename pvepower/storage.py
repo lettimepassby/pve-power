@@ -37,7 +37,7 @@ from typing import Iterable, Optional
 
 from .config import Config, TariffConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
+
+CREATE TABLE IF NOT EXISTS daily_rollup (
+    day           TEXT PRIMARY KEY,      -- YYYY-MM-DD
+    kwh           REAL    NOT NULL,
+    cost          REAL    NOT NULL,
+    samples       INTEGER NOT NULL,
+    min_watts     REAL,
+    max_watts     REAL,
+    duration_s    INTEGER NOT NULL,
+    avg_watts     REAL
+);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -115,8 +126,28 @@ class Storage:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self._set_meta_default("schema_version", str(SCHEMA_VERSION))
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Upgrade existing databases to the current schema version."""
+        cur_version = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if cur_version is None:
+            # Fresh database: SCHEMA already ran, nothing to migrate.
+            return
+        ver = int(cur_version["value"])
+        if ver >= SCHEMA_VERSION:
+            return
+        # Version 1 → 2: add daily_rollup table (already in SCHEMA), no data.
+        if ver == 1:
+            # SCHEMA already created the table via CREATE IF NOT EXISTS.
+            self.conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),)
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -323,17 +354,76 @@ class Storage:
         return agg
 
     def aggregate_day(self, day: dt.date) -> Aggregate:
+        """Aggregate a single day from raw samples, or from rollup if purged."""
         start = dt.datetime.combine(day, dt.time.min)
         end = start + dt.timedelta(days=1) - dt.timedelta(seconds=1)
-        return self.aggregate_between(start, end, label=day.isoformat())
+        # Try raw samples first (fast path when data is present).
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(kwh), 0)  AS kwh,
+                   COALESCE(SUM(cost), 0) AS cost,
+                   COUNT(*)               AS n,
+                   MIN(watts)             AS wmin,
+                   MAX(watts)             AS wmax,
+                   COALESCE(SUM(CASE WHEN is_gap=0 THEN interval_s ELSE 0 END), 0)
+                                          AS dur
+            FROM samples WHERE ts >= ? AND ts <= ?
+            """,
+            (int(start.timestamp()), int(end.timestamp())),
+        ).fetchone()
+        if row["n"] > 0:
+            agg = Aggregate(
+                label=day.isoformat(),
+                kwh=float(row["kwh"]),
+                cost=float(row["cost"]),
+                samples=int(row["n"]),
+                min_watts=row["wmin"],
+                max_watts=row["wmax"],
+                duration_s=int(row["dur"]),
+            )
+            if agg.duration_s > 0:
+                agg.avg_watts = agg.kwh * 3_600_000.0 / agg.duration_s
+            return agg
+        # Fall back to the rollup if raw samples were purged.
+        rollup = self.conn.execute(
+            "SELECT * FROM daily_rollup WHERE day = ?", (day.isoformat(),)
+        ).fetchone()
+        if rollup:
+            return Aggregate(
+                label=day.isoformat(),
+                kwh=float(rollup["kwh"]),
+                cost=float(rollup["cost"]),
+                samples=int(rollup["samples"]),
+                min_watts=rollup["min_watts"],
+                max_watts=rollup["max_watts"],
+                duration_s=int(rollup["duration_s"]),
+                avg_watts=rollup["avg_watts"],
+            )
+        # Neither raw nor rollup: an empty day.
+        return Aggregate(
+            label=day.isoformat(), kwh=0.0, cost=0.0, samples=0,
+            min_watts=None, max_watts=None, duration_s=0, avg_watts=None,
+        )
 
     def aggregate_month(self, year: int, month: int) -> Aggregate:
-        start = dt.datetime(year, month, 1)
-        end = (
-            dt.datetime(year + (month == 12), (month % 12) + 1, 1)
-            - dt.timedelta(seconds=1)
-        )
-        return self.aggregate_between(start, end, label=f"{year}-{month:02d}")
+        """Month total, summing per-day figures so purged days still count."""
+        start = dt.date(year, month, 1)
+        next_month = dt.date(year + (month == 12), (month % 12) + 1, 1)
+        days = (next_month - start).days
+        series = self.daily_series(days=days, end=next_month - dt.timedelta(days=1))
+        agg = Aggregate(label=f"{year}-{month:02d}")
+        mins = [a.min_watts for a in series if a.min_watts is not None]
+        maxes = [a.max_watts for a in series if a.max_watts is not None]
+        for a in series:
+            agg.kwh += a.kwh
+            agg.cost += a.cost
+            agg.samples += a.samples
+            agg.duration_s += a.duration_s
+        agg.min_watts = min(mins) if mins else None
+        agg.max_watts = max(maxes) if maxes else None
+        if agg.duration_s > 0:
+            agg.avg_watts = agg.kwh * 3_600_000.0 / agg.duration_s
+        return agg
 
     def daily_series(self, days: int = 30, end: Optional[dt.date] = None) -> list[Aggregate]:
         """Per-day aggregates, oldest first, computed in one pass."""
@@ -358,13 +448,35 @@ class Storage:
             (start_ts, end_ts),
         ).fetchall()
         by_day = {r["d"]: r for r in rows}
+        # Days whose raw samples have been purged still have a rollup row;
+        # read those so a 90-day retention does not blank the history.
+        roll = {
+            r["day"]: r
+            for r in self.conn.execute(
+                "SELECT * FROM daily_rollup WHERE day >= ? AND day <= ?",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        }
         series: list[Aggregate] = []
         for offset in range(days):
             day = start + dt.timedelta(days=offset)
             key = day.isoformat()
             row = by_day.get(key)
             if row is None:
-                series.append(Aggregate(label=key))
+                r = roll.get(key)
+                if r is None:
+                    series.append(Aggregate(label=key))
+                else:
+                    series.append(Aggregate(
+                        label=key,
+                        kwh=float(r["kwh"]),
+                        cost=float(r["cost"]),
+                        samples=int(r["samples"]),
+                        min_watts=r["min_watts"],
+                        max_watts=r["max_watts"],
+                        duration_s=int(r["duration_s"]),
+                        avg_watts=r["avg_watts"],
+                    ))
                 continue
             agg = Aggregate(
                 label=key,
@@ -517,11 +629,78 @@ class Storage:
         return len(updates)
 
     def purge_before(self, cutoff: dt.datetime) -> int:
-        cur = self.conn.execute(
-            "DELETE FROM samples WHERE ts < ?", (int(cutoff.timestamp()),)
-        )
-        self.conn.commit()
-        return cur.rowcount
+        """Delete raw samples older than `cutoff`, rolling them up first.
+
+        The rollup runs inside the same transaction as the delete, so a
+        crash between the two cannot lose a day's history: either both
+        happen or neither does. Reports fall back to the rollup for days
+        whose raw samples are gone, so purging costs resolution, never
+        the electricity bill itself.
+        """
+        cutoff_ts = int(cutoff.timestamp())
+        with self.conn:
+            self.rollup_before(cutoff, commit=False)
+            cur = self.conn.execute(
+                "DELETE FROM samples WHERE ts < ?", (cutoff_ts,)
+            )
+            return cur.rowcount
+
+    def rollup_before(self, cutoff: dt.datetime, commit: bool = True) -> int:
+        """Summarise every day that ends before `cutoff` into daily_rollup.
+
+        Idempotent: a day already rolled up is recomputed from whatever
+        raw samples remain, so calling this twice is harmless. Days with
+        no raw samples left are not touched, which is what preserves
+        history across repeated purges.
+        """
+        cutoff_ts = int(cutoff.timestamp())
+        rows = self.conn.execute(
+            """
+            SELECT date(ts, 'unixepoch', 'localtime')  AS day,
+                   COALESCE(SUM(kwh), 0)               AS kwh,
+                   COALESCE(SUM(cost), 0)              AS cost,
+                   COUNT(*)                            AS n,
+                   MIN(watts)                          AS wmin,
+                   MAX(watts)                          AS wmax,
+                   COALESCE(SUM(CASE WHEN is_gap=0 THEN interval_s ELSE 0 END), 0)
+                                                       AS dur
+            FROM samples WHERE ts < ?
+            GROUP BY day
+            """,
+            (cutoff_ts,),
+        ).fetchall()
+        written = []
+        for r in rows:
+            dur = int(r["dur"] or 0)
+            avg = (float(r["kwh"]) * 3_600_000.0 / dur) if dur > 0 else None
+            written.append((
+                r["day"], float(r["kwh"]), float(r["cost"]), int(r["n"]),
+                r["wmin"], r["wmax"], dur, avg,
+            ))
+        if written:
+            self.conn.executemany(
+                """
+                INSERT INTO daily_rollup
+                    (day, kwh, cost, samples, min_watts, max_watts,
+                     duration_s, avg_watts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(day) DO UPDATE SET
+                    kwh=excluded.kwh, cost=excluded.cost,
+                    samples=excluded.samples, min_watts=excluded.min_watts,
+                    max_watts=excluded.max_watts,
+                    duration_s=excluded.duration_s,
+                    avg_watts=excluded.avg_watts
+                """,
+                written,
+            )
+        if commit:
+            self.conn.commit()
+        return len(written)
+
+    def rollup_day(self, day: dt.date) -> None:
+        """Rollup a single day into daily_rollup. For testing."""
+        cutoff = dt.datetime.combine(day + dt.timedelta(days=1), dt.time.min)
+        self.rollup_before(cutoff, commit=True)
 
 
 def _row_to_sample(row: sqlite3.Row) -> Sample:
