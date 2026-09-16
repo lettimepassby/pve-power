@@ -1,0 +1,40 @@
+[Unit]
+Description=pve-power electricity metering collector
+Documentation=file:/opt/pve-power/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Never give up restarting: a BMC can be unhappy for a long while, and a
+# metering daemon that stays dead leaves an unrecoverable hole in the data.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m pvepower --config /etc/pve-power/config.json collect
+WorkingDirectory=/opt/pve-power
+Environment=PYTHONPATH=/opt/pve-power
+Environment=PYTHONUNBUFFERED=1
+
+# The collector is a long-lived sampling loop: restart it whenever it
+# stops, and keep restarting even if the BMC is unhappy for a while.
+Restart=always
+RestartSec=10
+
+# It needs /dev/ipmi0 and its own state directory, nothing else.
+StateDirectory=pve-power
+ConfigurationDirectory=pve-power
+DeviceAllow=/dev/ipmi0 rw
+DeviceAllow=/dev/ipmidev/0 rw
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pve-power
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
