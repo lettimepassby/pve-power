@@ -1,12 +1,11 @@
-"""BMC view: identity, LAN configuration, and chassis control.
+"""BMC 视图：硬件身份信息、LAN 配置与机箱控制。
 
-Editing here writes to the BMC. Two guardrails apply throughout:
+这里的编辑会写进 BMC，因此全程有两条护栏：
 
-  * Changing the LAN parameters of the channel you are *reaching the BMC
-    through* can cut you off. When the tool is running against a remote
-    BMC, those edits warn before proceeding.
-  * Chassis power actions are confirmed in full (typing `yes`), because
-    `power off` on the wrong machine is not recoverable from a TUI.
+  * 修改「你用来连上 BMC 的那个通道」的 LAN 参数，可能把你自己关在门外。
+    当工具连的是远端 BMC 时，这类修改会先警告再继续。
+  * 机箱电源操作要求完整输入 `yes` 确认，因为对错误的机器执行
+    `power off` 是无法从 TUI 里挽回的。
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from ..widgets import (
     choose,
     color,
     confirm,
+    cwidth,
     draw_box,
     pad,
     safe_addstr,
@@ -38,12 +38,41 @@ from ..widgets import (
 )
 from .base import View
 
+# LAN 字段在界面上显示的名称。左侧的键是 ipmitool 自己的字段名——读取
+# 回来的值就是以它们为键存放的——所以键必须原样保留，只翻译显示。
+LAN_LABELS = {
+    "IP Address Source": "IP 地址来源",
+    "IP Address": "IP 地址",
+    "Subnet Mask": "子网掩码",
+    "Default Gateway IP": "默认网关 IP",
+    "SNMP Community String": "SNMP 团体名",
+}
+
+# 上电恢复策略的中文对照，仅用于显示：发给 ipmitool 的仍是原值。
+POLICY_LABELS = {
+    "always-on": "始终上电",
+    "always-off": "保持断电",
+    "previous": "恢复断电前的状态",
+}
+
+# 危险电源操作的后果，接在确认问题后面，和英文版一样把话说透。
+POWER_CONSEQUENCE = {
+    "off": "这会立即切断电源，操作系统来不及正常关机。",
+    "cycle": "机器会立即断电再上电，未保存的数据会丢失。",
+    "reset": "机器会立即硬重启，未保存的数据会丢失。",
+}
+
+
+def _lan_label(key: str) -> str:
+    """界面显示用的 LAN 字段名；键本身仍是 ipmitool 的字段名。"""
+    return LAN_LABELS.get(key, key)
+
 
 def _validate_ip(value: str) -> str:
     try:
         ipaddress.IPv4Address(value.strip())
     except ValueError:
-        return "Not a valid IPv4 address"
+        return "不是有效的 IPv4 地址"
     return ""
 
 
@@ -51,12 +80,12 @@ def _validate_netmask(value: str) -> str:
     try:
         addr = ipaddress.IPv4Address(value.strip())
     except ValueError:
-        return "Not a valid IPv4 netmask"
+        return "不是有效的 IPv4 子网掩码"
     # A netmask must be a run of ones followed by a run of zeros.
     bits = int(addr)
     inverted = bits ^ 0xFFFFFFFF
     if bits and ((inverted + 1) & inverted) != 0:
-        return "Not a contiguous netmask (e.g. 255.255.255.0)"
+        return "子网掩码必须是连续的一段 1 加一段 0（例如 255.255.255.0）"
     return ""
 
 
@@ -65,13 +94,13 @@ def _validate_vlan(value: str) -> str:
     if v in ("off", "disable", "none", ""):
         return ""
     if not v.isdigit() or not 1 <= int(v) <= 4094:
-        return "VLAN id must be 1-4094, or 'off'"
+        return "VLAN ID 必须是 1-4094，或填 'off'"
     return ""
 
 
 class BmcView(View):
     title = "BMC"
-    hotkeys = [("Enter", "edit"), ("c", "chassis"), ("i", "identify")]
+    hotkeys = [("Enter", "编辑"), ("c", "机箱"), ("i", "定位")]
 
     # (label, kind, ipmitool `lan set` key)
     LAN_FIELDS = [
@@ -93,7 +122,11 @@ class BmcView(View):
         lan = self.data.lan_config
         if lan:
             for label, kind, setter in self.LAN_FIELDS:
-                rows.append(("lan", label, lan.get(label, "—"), kind, setter))
+                # `label` is what ipmitool calls the field, so it is what the
+                # value is looked up by; only the text shown is translated.
+                rows.append(
+                    ("lan", _lan_label(label), lan.get(label, "—"), kind, setter)
+                )
         return rows
 
     def draw(self, win, height: int, width: int) -> None:
@@ -103,19 +136,19 @@ class BmcView(View):
         self._draw_chassis(win, 11, 0, height - 11, width)
 
     def _draw_identity(self, win, y, x, h, w):
-        draw_box(win, y, x, h, w, "BMC Identity",
+        draw_box(win, y, x, h, w, "BMC 信息",
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         mc = self.data.mc_info or {}
         fru = self.data.fru or {}
         items = [
-            ("Manufacturer", mc.get("Manufacturer Name", "?")),
-            ("Product", fru.get("Product Name", "?")),
-            ("Board", fru.get("Board Product", "?")),
-            ("Serial", fru.get("Product Serial", "?")),
-            ("IPMI version", mc.get("IPMI Version", "?")),
-            ("Firmware", mc.get("Firmware Revision", "?")),
-            ("Device ID", mc.get("Device ID", "?")),
-            ("Available", mc.get("Device Available", "?")),
+            ("制造商", mc.get("Manufacturer Name", "?")),
+            ("产品型号", fru.get("Product Name", "?")),
+            ("主板型号", fru.get("Board Product", "?")),
+            ("序列号", fru.get("Product Serial", "?")),
+            ("IPMI 版本", mc.get("IPMI Version", "?")),
+            ("固件版本", mc.get("Firmware Revision", "?")),
+            ("设备 ID", mc.get("Device ID", "?")),
+            ("可用状态", mc.get("Device Available", "?")),
         ]
         for i, (label, value) in enumerate(items):
             row = y + 1 + i
@@ -127,10 +160,10 @@ class BmcView(View):
     def _draw_lan(self, win, y, x, h, w):
         lan = self.data.lan_config
         channel = lan.channel if lan else self.app.config.ipmi.lan_channel
-        draw_box(win, y, x, h, w, f"LAN — channel {channel}",
+        draw_box(win, y, x, h, w, f"LAN — 通道 {channel}",
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         if not lan:
-            safe_addstr(win, y + 2, x + 2, "LAN configuration unavailable",
+            safe_addstr(win, y + 2, x + 2, "LAN 配置不可用",
                         color(CP_CRIT))
             return
         rows = self._rows()
@@ -145,44 +178,46 @@ class BmcView(View):
             safe_addstr(win, row, x + 18, pad(truncate(value, w - 20), w - 20), attr)
         mac_row = y + 1 + len(rows)
         if mac_row < y + h - 1:
-            safe_addstr(win, mac_row, x + 2, pad("MAC Address", 15), color(CP_DIM))
+            safe_addstr(win, mac_row, x + 2, pad("MAC 地址", 15), color(CP_DIM))
             safe_addstr(win, mac_row, x + 18, lan.mac, color(CP_ACCENT))
 
     def _draw_chassis(self, win, y, x, h, w):
-        draw_box(win, y, x, h, w, "Chassis & Power Control",
+        draw_box(win, y, x, h, w, "机箱与电源控制",
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         chassis = self.data.chassis_status or {}
         line = y + 1
         left = [
-            ("System Power", chassis.get("System Power", "?")),
-            ("Power Restore Policy", chassis.get("Power Restore Policy", "?")),
-            ("Last Power Event", chassis.get("Last Power Event", "-") or "-"),
-            ("Power Overload", chassis.get("Power Overload", "?")),
-            ("Main Power Fault", chassis.get("Main Power Fault", "?")),
-            ("Cooling/Fan Fault", chassis.get("Cooling/Fan Fault", "?")),
-            ("Drive Fault", chassis.get("Drive Fault", "?")),
-            ("Chassis Intrusion", chassis.get("Chassis Intrusion", "?")),
+            ("系统电源", chassis.get("System Power", "?")),
+            ("上电恢复策略", chassis.get("Power Restore Policy", "?")),
+            ("上次电源事件", chassis.get("Last Power Event", "-") or "-"),
+            ("电源过载", chassis.get("Power Overload", "?")),
+            ("主电源故障", chassis.get("Main Power Fault", "?")),
+            ("散热风扇故障", chassis.get("Cooling/Fan Fault", "?")),
+            ("硬盘故障", chassis.get("Drive Fault", "?")),
+            ("机箱入侵", chassis.get("Chassis Intrusion", "?")),
         ]
         for label, value in left:
             if line >= y + h - 4:
                 break
             safe_addstr(win, line, x + 2, pad(label, 22), color(CP_DIM))
             attr = status_attr(value)
-            if label.endswith("Fault") or label == "Power Overload":
+            # The label is what the Chinese text is matched on, so the fault
+            # test moved with it: these are the rows shown in alarm colours.
+            if label.endswith("故障") or label == "电源过载":
                 attr = color(CP_CRIT, bold=True) if value.lower() == "true" else color(CP_OK)
             safe_addstr(win, line, x + 25, value, attr)
             line += 1
 
         policies = self.data.power_policies
         if policies and line < y + h - 2:
-            safe_addstr(win, line, x + 2, pad("Supported policies", 22), color(CP_DIM))
+            safe_addstr(win, line, x + 2, pad("支持的策略", 22), color(CP_DIM))
             safe_addstr(win, line, x + 25, " ".join(policies), color(CP_ACCENT))
 
         footer = y + h - 2
         safe_addstr(
             win, footer, x + 2,
-            "c: power action    p: restore policy    i: identify LED    "
-            "Enter: edit LAN field",
+            "c：电源操作    p：恢复策略    i：定位指示灯    "
+            "Enter：编辑 LAN 字段",
             color(CP_DIM),
         )
 
@@ -217,7 +252,11 @@ class BmcView(View):
 
         if kind == "source":
             options = ["static", "dhcp", "bios", "none"]
-            idx = choose(stdscr, "IP address source", options)
+            # The value sent to ipmitool is the bare token; the menu shows a
+            # Chinese gloss beside it.
+            menu = ["static（静态）", "dhcp（DHCP 获取）", "bios（按 BIOS 设定）",
+                    "none（不设置）"]
+            idx = choose(stdscr, "IP 地址来源", menu)
             if idx is None:
                 return
             value = options[idx]
@@ -226,106 +265,115 @@ class BmcView(View):
             if self.app.ipmi.remote:
                 if not confirm(
                     stdscr,
-                    "You are managing this BMC over the network. "
-                    "Changing its IP will drop your connection. Continue?",
+                    "你正在通过网络管理这台 BMC，改掉它的 IP 会立即断开当前连接。"
+                    "确定要继续吗？",
                     danger=True,
                 ):
                     return
-            value = prompt.ask(f"{label}:", current, validator=_validate_ip)
+            value = prompt.ask(f"{label}：", current, validator=_validate_ip)
             if value is None:
                 return
             args = ("ipaddr", value.strip())
         elif kind == "netmask":
-            value = prompt.ask(f"{label}:", current, validator=_validate_netmask)
+            value = prompt.ask(f"{label}：", current, validator=_validate_netmask)
             if value is None:
                 return
             args = ("netmask", value.strip())
         elif kind == "gateway":
-            value = prompt.ask(f"{label}:", current, validator=_validate_ip)
+            value = prompt.ask(f"{label}：", current, validator=_validate_ip)
             if value is None:
                 return
             args = ("defgw", "ipaddr", value.strip())
         elif kind == "vlan":
             value = prompt.ask(
-                f"{label} (1-4094, or 'off'):", current, validator=_validate_vlan
+                f"{label}（1-4094，或 'off'）：", current, validator=_validate_vlan
             )
             if value is None:
                 return
             v = value.strip().lower()
             args = ("vlan", "id", "off" if v in ("off", "disable", "none", "") else v)
         else:
-            value = prompt.ask(f"{label}:", current)
+            value = prompt.ask(f"{label}：", current)
             if value is None:
                 return
             args = (setter, value.strip())
 
-        if not confirm(stdscr, f"Set {label} = {value} on channel {channel}?"):
+        if not confirm(stdscr, f"确定要在通道 {channel} 上设置 {label} = {value} 吗？"):
             return
         try:
             out = self.app.ipmi.run("lan", "set", str(channel), *args)
-            self.app.flash(f"{label} updated", ok=True)
+            self.app.flash(f"{label} 已更新", ok=True)
             if out.strip():
-                show_message(stdscr, "ipmitool output", out.strip())
+                show_message(stdscr, "ipmitool 输出", out.strip())
         except IpmiError as exc:
-            show_message(stdscr, "Failed to apply LAN setting", str(exc), is_error=True)
+            show_message(stdscr, "应用 LAN 设置失败", str(exc), is_error=True)
         self.data.invalidate("lan")
 
     def _power_action(self):
         stdscr = self.app.stdscr
         labels = [
-            "status  — query power state",
-            "on      — power on",
-            "soft    — graceful shutdown (ACPI)",
-            "off     — hard power off",
-            "cycle   — power cycle",
-            "reset   — hard reset",
+            "status  — 查询电源状态",
+            "on      — 开机",
+            "soft    — 软关机（ACPI）",
+            "off     — 强制断电",
+            "cycle   — 循环上电",
+            "reset   — 硬重启",
         ]
         actions = ["status", "on", "soft", "off", "cycle", "reset"]
-        idx = choose(stdscr, "Chassis power action", labels)
+        idx = choose(stdscr, "机箱电源操作", labels)
         if idx is None:
             return
         action = actions[idx]
         if action != "status":
             destructive = action in ("off", "cycle", "reset")
-            question = f"Really run 'chassis power {action}' on this machine?"
+            question = f"确定要对本机执行 'chassis power {action}' 吗？"
+            if action in POWER_CONSEQUENCE:
+                question += POWER_CONSEQUENCE[action]
             if not confirm(stdscr, question, danger=destructive):
                 return
         try:
             out = self.app.ipmi.chassis_power(action)
-            show_message(stdscr, f"chassis power {action}", out.strip() or "(no output)")
+            show_message(stdscr, f"chassis power {action}",
+                         out.strip() or "（无输出）")
             self.app.storage.log_event("chassis_power", action)
         except IpmiError as exc:
-            show_message(stdscr, "Power action failed", str(exc), is_error=True)
+            show_message(stdscr, "电源操作失败", str(exc), is_error=True)
         self.data.invalidate("chassis")
 
     def _set_policy(self):
         stdscr = self.app.stdscr
         policies = self.data.power_policies or ["always-off", "always-on", "previous"]
-        idx = choose(stdscr, "Power restore policy (after AC loss)", policies)
+        # The policy tokens are what ipmitool accepts, so they are shown as
+        # they are, with the Chinese gloss beside them.
+        labels = [
+            f"{p}（{POLICY_LABELS[p]}）" if p in POLICY_LABELS else p
+            for p in policies
+        ]
+        idx = choose(stdscr, "上电恢复策略（交流断电恢复后）", labels)
         if idx is None:
             return
         policy = policies[idx]
-        if not confirm(stdscr, f"Set power restore policy to '{policy}'?"):
+        if not confirm(stdscr, f"确定要把上电恢复策略设为 '{policy}' 吗？"):
             return
         try:
             self.app.ipmi.power_policy(policy)
-            self.app.flash(f"Restore policy set to {policy}", ok=True)
+            self.app.flash(f"上电恢复策略已设为 {policy}", ok=True)
             self.app.storage.log_event("power_policy", policy)
         except IpmiError as exc:
-            show_message(stdscr, "Failed to set policy", str(exc), is_error=True)
+            show_message(stdscr, "设置上电恢复策略失败", str(exc), is_error=True)
         self.data.invalidate("chassis")
 
     def _identify(self):
         stdscr = self.app.stdscr
         prompt = Prompt(stdscr)
         value = prompt.ask(
-            "Blink identify LED for how many seconds? (0 = off):", "15",
-            validator=lambda v: "" if v.strip().isdigit() else "Enter a number",
+            "定位指示灯闪烁多少秒？（0 = 关闭）：", "15",
+            validator=lambda v: "" if v.strip().isdigit() else "请输入一个数字",
         )
         if value is None:
             return
         try:
             self.app.ipmi.chassis_identify(int(value.strip()))
-            self.app.flash(f"Identify LED: {value.strip()}s", ok=True)
+            self.app.flash(f"定位指示灯：{value.strip()} 秒", ok=True)
         except IpmiError as exc:
-            show_message(stdscr, "Identify failed", str(exc), is_error=True)
+            show_message(stdscr, "定位指示灯操作失败", str(exc), is_error=True)

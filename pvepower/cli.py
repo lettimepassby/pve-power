@@ -1,13 +1,13 @@
-"""Command-line entry point.
+"""命令行入口。
 
-Subcommands:
-  tui       launch the interface (default)
-  collect   run the sampling daemon
-  sample    take a single reading, for testing
-  import    pull the legacy cron CSVs into the database
-  report    print consumption summaries
-  status    one-shot health check, suitable for scripting
-  config    show or initialise the configuration
+子命令：
+  tui       启动界面（默认）
+  collect   运行采集守护进程
+  sample    取一次读数，用于测试
+  import    把旧的 cron CSV 导入数据库
+  report    打印用电汇总
+  status    一次性健康检查，适合脚本调用
+  config    查看或初始化配置
 """
 
 from __future__ import annotations
@@ -21,17 +21,18 @@ from .config import Config, DEFAULT_CONFIG_PATH, default_china_tou
 from .collector import Collector, import_legacy_csv
 from .ipmi import IpmiError, IpmiTool
 from .storage import Storage
+from .textwidth import cwidth, lpad, rpad
 
 
 def _load(args) -> Config:
     config = Config.load(args.config)
     problems = config.validate()
     if problems:
-        print("Configuration problems:", file=sys.stderr)
+        print("配置存在问题：", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         if not getattr(args, "force", False):
-            print("Re-run with --force to continue anyway.", file=sys.stderr)
+            print("加 --force 可忽略这些问题继续运行。", file=sys.stderr)
             raise SystemExit(2)
     return config
 
@@ -51,14 +52,14 @@ def cmd_sample(args) -> int:
     collector = Collector(config)
     sample = collector.sample_once()
     if sample is None:
-        print("No usable reading (see events in the database).", file=sys.stderr)
+        print("没有可用读数（详见数据库中的事件记录）。", file=sys.stderr)
         return 1
     print(
         f"{dt.datetime.fromtimestamp(sample.ts):%Y-%m-%d %H:%M:%S}  "
-        f"{sample.watts:.0f} W  interval {sample.interval_s}s  "
+        f"{sample.watts:.0f} W  间隔 {sample.interval_s}s  "
         f"{sample.kwh:.6f} kWh  {sample.cost:.4f} {config.tariff.currency}"
         f"  @ {sample.price:.4f}/kWh [{sample.period}]"
-        + ("  (GAP — no energy attributed)" if sample.is_gap else "")
+        + ("  （缺口 — 未计入电量）" if sample.is_gap else "")
     )
     return 0
 
@@ -66,12 +67,12 @@ def cmd_sample(args) -> int:
 def cmd_import(args) -> int:
     config = _load(args)
     imported, skipped = import_legacy_csv(config, args.dir)
-    print(f"Imported {imported} rows, skipped {skipped}.")
+    print(f"已导入 {imported} 行，跳过 {skipped} 行。")
     if imported:
         with Storage(config.db_path) as storage:
             stats = storage.stats()
             print(
-                f"Database now holds {stats['samples']} samples "
+                f"数据库现有 {stats['samples']} 条采样 "
                 f"({stats.get('first', '?')} .. {stats.get('last', '?')}), "
                 f"{stats['total_kwh']} kWh, {stats['total_cost']} "
                 f"{config.tariff.currency}."
@@ -87,33 +88,48 @@ def cmd_report(args) -> int:
             year, month = (int(x) for x in args.month.split("-"))
             agg = storage.aggregate_month(year, month)
             print(f"{agg.label}:  {agg.kwh:.3f} kWh   {agg.cost:.2f} {cur}"
-                  f"   avg {agg.avg_watts:.0f} W")
+                  f"   平均 {agg.avg_watts:.0f} W")
             start = dt.datetime(year, month, 1)
             end = (dt.datetime(year + (month == 12), (month % 12) + 1, 1)
                    - dt.timedelta(seconds=1))
             rows = storage.period_breakdown(start, end)
             if len(rows) > 1:
-                print("\nBy tariff period:")
+                print("\n按电价时段统计：")
                 for name, kwh, cost in rows:
-                    print(f"  {name:<12}{kwh:>10.3f} kWh{cost:>12.2f} {cur}")
+                    print(f"  {lpad(name, 12)}{rpad(f'{kwh:.3f}', 10)} kWh"
+                          f"{rpad(f'{cost:.2f}', 12)} {cur}")
             return 0
 
         series = storage.daily_series(args.days)
-        print(f"{'Date':<12}{'kWh':>10}{'Cost':>12}{'Avg W':>9}{'Samples':>9}")
+        width = 12  # 日期列，按终端列宽计
+        print(
+            lpad("日期", width) + rpad("电量kWh", 10) + rpad("电费", 12)
+            + rpad("平均W", 9) + rpad("采样数", 9)
+        )
         for agg in series:
-            print(f"{agg.label:<12}{agg.kwh:>10.3f}{agg.cost:>12.2f}"
-                  f"{agg.avg_watts:>9.0f}{agg.samples:>9}")
+            print(
+                lpad(agg.label, width)
+                + rpad(f"{agg.kwh:.3f}", 10)
+                + rpad(f"{agg.cost:.2f}", 12)
+                + rpad(f"{agg.avg_watts:.0f}", 9)
+                + rpad(str(agg.samples), 9)
+            )
         total_kwh = sum(a.kwh for a in series)
         total_cost = sum(a.cost for a in series)
         print("-" * 52)
-        print(f"{'Total':<12}{total_kwh:>10.3f}{total_cost:>12.2f} {cur}")
+        print(
+            lpad("合计", width)
+            + rpad(f"{total_kwh:.3f}", 10)
+            + rpad(f"{total_cost:.2f}", 12)
+            + f" {cur}"
+        )
         active = [a for a in series if a.kwh > 0]
         if active:
             per_day = total_cost / len(active)
-            print(f"\nPer active day: {total_kwh / len(active):.2f} kWh, "
+            print(f"\n日均（仅统计有用电的天）：{total_kwh / len(active):.2f} kWh，"
                   f"{per_day:.2f} {cur}")
-            print(f"At this rate:   {per_day * 30:.0f} {cur}/month, "
-                  f"{per_day * 365:.0f} {cur}/year")
+            print(f"按此推算：{per_day * 30:.0f} {cur}/月，"
+                  f"{per_day * 365:.0f} {cur}/年")
     return 0
 
 
@@ -175,15 +191,15 @@ def cmd_config(args) -> int:
         if args.preset == "china-tou":
             config.tariff = default_china_tou()
         config.save(args.config)
-        print(f"Wrote {args.config}")
-        print("Edit the prices to match your own bill, then run: "
+        print(f"已写入 {args.config}")
+        print("把电价改成你自己账单上的数字，然后运行："
               "pve-power tui")
         return 0
     config = Config.load(args.config)
     print(json.dumps(config.to_dict(), indent=2, ensure_ascii=False))
     problems = config.validate()
     if problems:
-        print("\nProblems:", file=sys.stderr)
+        print("\n问题：", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
@@ -193,44 +209,44 @@ def cmd_config(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pve-power",
-        description="IPMI power metering and BMC management for Proxmox VE",
+        description="Proxmox VE 的 IPMI 电量统计与 BMC 管理工具",
     )
     parser.add_argument(
         "-c", "--config", default=DEFAULT_CONFIG_PATH,
-        help=f"configuration file (default: {DEFAULT_CONFIG_PATH})",
+        help=f"配置文件（默认：{DEFAULT_CONFIG_PATH}）",
     )
     parser.add_argument(
         "--force", action="store_true",
-        help="continue despite configuration problems",
+        help="即使配置有问题也继续运行",
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("tui", help="launch the interface").set_defaults(func=cmd_tui)
-    sub.add_parser("collect", help="run the sampling daemon").set_defaults(
+    sub.add_parser("tui", help="启动界面").set_defaults(func=cmd_tui)
+    sub.add_parser("collect", help="运行采集守护进程").set_defaults(
         func=cmd_collect
     )
-    sub.add_parser("sample", help="take one reading and store it").set_defaults(
+    sub.add_parser("sample", help="取一次读数并存储").set_defaults(
         func=cmd_sample
     )
 
-    p_import = sub.add_parser("import", help="import the legacy cron CSVs")
-    p_import.add_argument("--dir", default=None, help="directory holding the CSVs")
+    p_import = sub.add_parser("import", help="导入旧的 cron CSV 文件")
+    p_import.add_argument("--dir", default=None, help="存放 CSV 的目录")
     p_import.set_defaults(func=cmd_import)
 
-    p_report = sub.add_parser("report", help="print consumption summaries")
-    p_report.add_argument("--days", type=int, default=30)
-    p_report.add_argument("--month", help="report one month, as YYYY-MM")
+    p_report = sub.add_parser("report", help="打印用电汇总")
+    p_report.add_argument("--days", type=int, default=30, help="统计最近多少天")
+    p_report.add_argument("--month", help="按月份统计，格式 YYYY-MM")
     p_report.set_defaults(func=cmd_report)
 
-    p_status = sub.add_parser("status", help="one-shot health check")
-    p_status.add_argument("--json", action="store_true")
+    p_status = sub.add_parser("status", help="一次性健康检查")
+    p_status.add_argument("--json", action="store_true", help="以 JSON 输出")
     p_status.set_defaults(func=cmd_status)
 
-    p_config = sub.add_parser("config", help="show or create the configuration")
-    p_config.add_argument("--init", action="store_true", help="write a default file")
+    p_config = sub.add_parser("config", help="查看或创建配置")
+    p_config.add_argument("--init", action="store_true", help="写入默认配置文件")
     p_config.add_argument(
         "--preset", choices=["flat", "china-tou"], default="flat",
-        help="tariff preset to start from when using --init",
+        help="配合 --init 使用的电价预设方案",
     )
     p_config.set_defaults(func=cmd_config)
 

@@ -1,11 +1,11 @@
 [Unit]
-Description=pve-power electricity metering collector
+Description=pve-power 电量采集服务
 Documentation=file:/opt/pve-power/README.md
 After=network-online.target
 Wants=network-online.target
 
-# Never give up restarting: a BMC can be unhappy for a long while, and a
-# metering daemon that stays dead leaves an unrecoverable hole in the data.
+# 永远不要放弃重启：BMC 可能长时间不正常，而一个彻底死掉的
+# 采集进程会在数据里留下无法弥补的缺口。
 StartLimitIntervalSec=0
 
 [Service]
@@ -15,8 +15,8 @@ WorkingDirectory=/opt/pve-power
 Environment=PYTHONPATH=/opt/pve-power
 Environment=PYTHONUNBUFFERED=1
 
-# The collector is a long-lived sampling loop: restart it whenever it
-# stops, and keep restarting even if the BMC is unhappy for a while.
+# 采集器是一个长期运行的采样循环：停掉就重启，
+# 即使 BMC 一段时间不正常也要持续重试。
 Restart=always
 RestartSec=10
 

@@ -1,170 +1,148 @@
 # pve-power
 
-Electricity metering and BMC management for a Proxmox VE host, driven
-entirely through IPMI. It samples the power draw the server reports over
-DCMI, turns those samples into kWh and money, and gives you a terminal
-interface for reading and changing the BMC's configuration.
+给 Proxmox VE 主机做电量统计和 BMC 管理，全部通过 IPMI 完成。它采样服务器
+经 DCMI 上报的功率，把这些采样变成 kWh 和电费，并提供一个终端界面来查看和
+修改 BMC 的配置。
 
-Pure Python standard library — no pip, no packages to install. It needs
-`python3` (with `curses` and `sqlite3`, both of which Debian's build
-includes) and `ipmitool`.
+纯 Python 标准库实现 —— 不需要 pip，不需要安装任何依赖。运行需要 `python3`
+（带 `curses` 和 `sqlite3`，Debian 自带的编译版本都有）和 `ipmitool`。
 
-## Why it exists
+## 为什么要有这个项目
 
-The cron job this replaces looked like:
+它替代的 cron 脚本长这样：
 
 ```bash
 w=$(ipmitool dcmi power reading | awk '/Instantaneous/{print $4}')
 echo "$(date '+%F %T'),$w" >> /var/log/pve-power/$(date +%F).csv
 ```
 
-That records what the machine was drawing at each moment, which is a
-useful log but not a bill. An instantaneous wattage says nothing about
-energy on its own; you have to integrate it over time, decide what to do
-about the minutes when nothing was recorded, and price each bit of energy
-at whatever rate applied *when it was consumed*. This project does those
-three things, and the old CSVs can be imported so the history is not lost.
+它记录的是每个时刻机器的瞬时功率。这是一份有用的日志，但不是账单。
+单看一个瞬时瓦数说明不了耗电量 —— 你必须对它按时间积分、决定没采到样的
+那些分钟怎么处理、并且按**用电当时**生效的电价给每一度电计价。这个项目做的
+就是这三件事，并且可以导入旧 CSV，历史数据不会丢。
 
-## Install
+## 安装
 
-From a checkout on the PVE host, as root:
+在 PVE 主机上以 root 身份、在代码目录里执行：
 
 ```bash
 ./tools/install.sh
 ```
 
-It copies the package to `/opt/pve-power`, installs `/usr/local/bin/pve-power`,
-writes `/etc/pve-power/config.json` if there isn't one already, imports any
-existing `/var/log/pve-power/*.csv`, offers to retire the old cron entry,
-and starts the collector service. Re-running it upgrades the code and
-leaves your configuration and database alone.
+它会把程序装到 `/opt/pve-power`，生成 `/usr/local/bin/pve-power` 启动器，
+如果还没有配置文件就写入 `/etc/pve-power/config.json`，导入已有的
+`/var/log/pve-power/*.csv`，询问你是否停用旧的 cron 任务，然后启动采集服务。
+重复执行它是安全的：只升级代码，不动你的配置和数据库。
 
-**Set your electricity price before trusting any cost figure.** The
-default is a placeholder of 0.60 CNY/kWh. Launch `pve-power`, go to the
-Tariff tab, and edit the rates to match your own bill.
+**在看电费数字之前，先把电价设对。** 默认值 0.60 元/kWh 只是占位。
+启动 `pve-power`，进"电价"标签页，把费率改成你账单上的数字。
 
-## Use
+## 使用
 
 ```
-pve-power                  launch the interface (default)
-pve-power status           one-shot health check; --json for scripts
-pve-power report           consumption summary; --days N or --month YYYY-MM
-pve-power sample           take a single reading and store it
-pve-power collect          run the sampling loop (this is what systemd runs)
-pve-power import           import the legacy cron CSVs; --dir to override
-pve-power config --init    write a default config; --preset flat|china-tou
+pve-power                  启动界面（默认）
+pve-power status           一次性健康检查；--json 便于脚本调用
+pve-power report           用电汇总；--days N 或 --month YYYY-MM
+pve-power sample           取一次读数并存储
+pve-power collect          运行采样循环（systemd 跑的就是这个）
+pve-power import           导入旧的 cron CSV；--dir 指定目录
+pve-power config --init    写入默认配置；--preset flat|china-tou
 ```
 
-`-c/--config` points at a different configuration file. `--force` runs
-despite configuration problems that would otherwise stop the command.
+`-c/--config` 指定其他配置文件。`--force` 在配置有问题时仍然继续运行。
 
-### The interface
+### 界面
 
-Tabs are `1`–`7` or Tab/Shift-Tab; `r` refreshes, `?` lists keys, `q` quits.
-Arrows, PgUp/PgDn, Home/End and `j`/`k`/`g`/`G` move within a view.
+用 `1`–`7` 或 Tab/Shift-Tab 切换标签页；`r` 刷新，`?` 查看按键说明，`q` 退出。
+方向键、PgUp/PgDn、Home/End 以及 `j`/`k`/`g`/`G` 在视图内移动。
 
-| Tab | Shows | Keys |
+| 标签页 | 内容 | 按键 |
 | --- | --- | --- |
-| Overview | live watts, today and this month, projected month cost, BMC and chassis health | `r` refresh |
-| Energy | daily or hourly consumption with cost, as bars | `d`/`h` daily or hourly, `[` `]` range, Enter drill into a day, `e` export CSV |
-| Sensors | every IPMI sensor with its headroom to the critical threshold | `f` filter by kind, `o` faults only |
-| BMC | firmware and FRU identity, LAN configuration, chassis status | Enter edit a field, `c` chassis power, `p` power-restore policy, `i` identify LED |
-| Users | BMC accounts, privilege, and which are vendor defaults | `p` password, `n` rename, `e`/`d` enable or disable, `v` privilege |
-| SEL | the event log, triaged by severity | `o` problems only, `X` clear the log |
-| Tariff | prices, billing mode, sampling settings | Enter edit, `m` switch flat/TOU, `a`/`x` add or remove a tier, `P` load a preset, `s` save, `R` reprice history |
+| 总览 | 实时功率、今日与本月用电量和电费、预计月电费、BMC 与机箱健康状态 | `r` 刷新 |
+| 电量 | 按天或按小时的用电量与电费，柱状展示 | `d`/`h` 按天/按小时，`[` `]` 调整范围，Enter 钻取某天，`e` 导出 CSV |
+| 传感器 | 每个 IPMI 传感器及其到临界阈值的余量 | `f` 按类别筛选，`o` 只看故障 |
+| BMC | 固件与 FRU 信息、网络配置、机箱状态 | Enter 编辑字段，`c` 机箱电源，`p` 上电恢复策略，`i` 定位指示灯 |
+| 用户 | BMC 账户、权限，以及哪些是厂商默认账户 | `p` 改密码，`n` 改名，`e`/`d` 启用/禁用，`v` 权限 |
+| 事件日志 | BMC 事件日志，按严重程度分级 | `o` 只看问题事件，`X` 清空日志 |
+| 电价 | 价格、计费模式、采样设置 | Enter 编辑，`m` 切换单一/分时电价，`a`/`x` 增删阶梯，`P` 载入预设，`s` 保存，`R` 重算历史 |
 
-Anything that changes the BMC asks first, and the genuinely dangerous
-actions — a hard power-off, clearing the SEL — make you type `yes` in
-full. Changing the BMC's IP address over a remote connection warns you
-that you are about to cut the branch you are sitting on.
+任何会改动 BMC 的操作都会先确认；真正危险的操作 —— 强制断电、清空事件日志
+—— 需要你完整输入 `yes` 才会执行。在远程连接下修改 BMC 的 IP 地址时，会先
+警告你这一步会切断你当前的连接。
 
-## How the numbers are produced
+## 数字是怎么算出来的
 
-**Energy.** Each sample is integrated against the one before it with the
-trapezoidal rule: `kWh = (W₁ + W₂)/2 × Δt / 3,600,000`. Multiplying a
-single reading by the interval instead would bias the total by whichever
-way the load happened to be moving — high while ramping up, low while
-ramping down. Averaging the two readings that bracket the interval is
-exact for a linear ramp and much closer for everything else.
+**电量。** 每个采样点与前一个采样点之间用梯形法积分：
+`kWh = (W₁ + W₂)/2 × Δt / 3,600,000`。如果改用单次读数乘以间隔，总量会被
+负载当时的升降方向带偏 —— 上升时偏高，下降时偏低。取区间两端读数的平均值，
+对线性变化是精确的，对其他情况也远比矩形法接近。
 
-**Gaps.** If more than `max_gap_seconds` passed since the previous sample
-(default 900s), the interval is recorded with zero energy and flagged as a
-gap. The collector was not running, so there is no honest basis for
-claiming the machine drew anything; inventing consumption across an outage
-would be worse than admitting the hole. The Energy tab shows coverage so
-you can see how much of a period was actually measured.
+**缺口。** 如果距上次采样超过了 `max_gap_seconds`（默认 900 秒），这个区间
+记为 0 电量并标记为缺口。采集器当时没在运行，就没有任何诚实的依据声称机器
+耗了电；编造停机期间的用电量，比承认这个数据洞更糟。"电量"标签页会显示
+覆盖率，你可以看到某段时间里实际被测量到的比例。
 
-**Money.** Cost is computed per sample, at the price in force at that
-sample's timestamp, and stored alongside it. Editing your tariff next
-month therefore cannot rewrite what last month cost. When you genuinely
-want history recalculated — you entered the wrong price and want to fix
-it — `R` on the Tariff tab reprices all samples, replaying month-to-date
-totals so tiered pricing steps exactly as it did live. It never changes
-recorded kWh, only what that energy is said to have cost.
+**电费。** 每个采样点按**其时间戳当时**生效的电价算好，和采样一起存下来。
+所以下个月修改电价，不会篡改上个月的费用。当你确实需要重算历史时 —— 比如
+电价填错了要修正 —— 在"电价"标签页按 `R`，它会重算所有采样，并按自然月
+重置月累计电量，让阶梯电价一级一级地复现当时的跳档过程。它只改钱，
+永远不改已记录的电量。
 
-**Averages.** Average watts over a period is `kWh × 3,600,000 / covered
-seconds` — weighted by time, not by sample count, so a burst of closely
-spaced samples doesn't drag the average toward itself.
+**平均值。** 某段时间的平均功率是 `kWh × 3,600,000 / 有效时长` —— 按时间
+加权，而不是按采样条数加权，所以密集采样的一段不会把平均值拉向自己。
 
-### Tariffs
+### 电价
 
-Three modes, and the tiers compose with the others:
+三种模式，阶梯是在其他模式之上叠加的：
 
-- **flat** — one price per kWh.
-- **tou** (分时电价) — a price per hour-of-day, optionally restricted to
-  certain weekdays. Hours you don't cover fall back to the flat price
-  rather than billing at zero; the Tariff tab shows a 24-hour strip
-  marking anything uncovered.
-- **tiered** (阶梯电价) — a surcharge added on top, stepping as the
-  month's cumulative kWh crosses each threshold. The last tier must be
-  unbounded.
+- **单一电价（flat）** —— 每度电一个价。
+- **分时电价（tou）** —— 按一天中的小时定价，可选限定星期几。没有覆盖到的
+  小时会回退到基础电价，而不是按 0 元计费；"电价"标签页有一条 24 格覆盖条，
+  标出哪些小时没被覆盖。
+- **阶梯电价（tiered）** —— 在基础电价之上加价，按当月累计电量跨过各档
+  阈值逐级跳档。最后一档必须不设上限。
 
-`pve-power config --init --preset china-tou` writes a sample Chinese TOU
-schedule (尖峰/高峰/平段/低谷). The prices in it are examples, not your
-utility's.
+`pve-power config --init --preset china-tou` 会写入一份示例分时电价方案
+（尖峰/高峰/平段/低谷）。里面的价格只是示例，不是你当地电网的价格。
 
-## Remote BMCs
+## 远程 BMC
 
-Leaving `ipmi.host` empty uses the local KCS interface via `/dev/ipmi0`,
-which is what you want on the PVE host itself. Setting it makes every call
-go out over the network with `-I lanplus`, so you can run the interface
-from a workstation against a server's BMC. The password lives in the
-config file, which is why it is written `0600`.
+`ipmi.host` 留空时使用本地 KCS 接口（`/dev/ipmi0`），在 PVE 主机上跑就应该
+这样。填上地址后，所有调用都会改走网络、使用 `-I lanplus`，这样你可以从
+工作站连到服务器的 BMC 上操作。密码就存在配置文件里，所以它的权限是 `0600`。
 
-## Layout
+## 目录结构
 
 ```
-pvepower/ipmi.py        every ipmitool invocation and its parsing
-pvepower/storage.py     SQLite schema, integration, aggregation, repricing
-pvepower/config.py      config model, tariff maths, validation
-pvepower/collector.py   the sampling daemon and the legacy CSV importer
-pvepower/cli.py         subcommands
-pvepower/tui/           curses interface: app, data cache, widgets, views
-etc/                    systemd unit
-tools/install.sh        installer
-tests/                  energy/tariff maths, and a pty-driven TUI smoke test
+pvepower/ipmi.py        所有 ipmitool 调用及其输出解析
+pvepower/storage.py     SQLite 表结构、积分、聚合、重算
+pvepower/config.py      配置模型、电价计算、校验
+pvepower/collector.py   采样守护进程和旧 CSV 导入
+pvepower/cli.py         子命令
+pvepower/tui/           curses 界面：app、数据缓存、控件、各视图
+pvepower/textwidth.py   中日韩宽字符的终端列宽计算
+etc/                    systemd 单元文件
+tools/install.sh        安装脚本
+tests/                  电量与电价计算测试，以及 pty 驱动的界面冒烟测试
 ```
 
-`/etc/pve-power/config.json` holds configuration, `/var/lib/pve-power/power.db`
-the samples. The database runs in WAL mode so the interface can read while
-the collector writes.
+配置文件在 `/etc/pve-power/config.json`，采样数据在
+`/var/lib/pve-power/power.db`。数据库使用 WAL 模式，所以采集器写入时界面
+可以同时读取。
 
-## Tests
+## 测试
 
 ```bash
 python3 -m unittest tests.test_energy tests.test_tui
 ```
 
-`test_energy` checks the integration and pricing against hand-computed
-values — 100W for an hour is 0.1 kWh, a 100→200W ramp over an hour is
-0.15 kWh, a valley kWh billed at 0.20 stays at 0.20 after peak samples
-arrive. `test_tui` renders every view in a real pty at six terminal sizes,
-including one below the declared minimum, and presses every key including
-the ones that open dialogs.
+`test_energy` 用人工手算的数值校验积分和计价 —— 100W 持续一小时是 0.1 kWh，
+一小时内从 100W 线性升到 200W 是 0.15 kWh，谷时按 0.20 计费的 1 度电在峰时
+采样加入后仍然是 0.20。`test_tui` 在真实 pty 里以六种终端尺寸渲染每一个视图
+（包括一种小于最小尺寸的），并按下所有按键，包括会弹出对话框的那些。
 
-## Things this does not do
+## 没有做的事
 
-DCMI power capping is not implemented: this BMC (Inspur SA5112M4,
-firmware 4.12) answers `dcmi power get_limit` with error 80, so there was
-nothing to build against. The code paths for it were left out rather than
-shipped untested.
+没有实现 DCMI 功率封顶（power capping）：这台 BMC（浪潮 SA5112M4，固件 4.12）
+对 `dcmi power get_limit` 返回 error 80，没有可对接的东西。相关代码是直接
+不写，而不是交付一份没验证过的实现。

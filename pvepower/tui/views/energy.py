@@ -1,4 +1,4 @@
-"""Energy view: daily/hourly consumption history with cost breakdown."""
+"""电量视图：按天／按小时的历史用电量与电费明细。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from ..widgets import (
     CP_TITLE,
     CP_WARN,
     color,
+    cwidth,
     draw_box,
     hbar,
     pad,
@@ -25,11 +26,11 @@ from .base import View
 
 
 class EnergyView(View):
-    title = "Energy"
+    title = "电量"
     hotkeys = [
-        ("d/h", "daily/hourly"),
-        ("[ ]", "range"),
-        ("e", "export"),
+        ("d/h", "按天/按小时"),
+        ("[ ]", "范围"),
+        ("e", "导出"),
     ]
 
     RANGES = [7, 14, 30, 60, 90]
@@ -55,19 +56,24 @@ class EnergyView(View):
     def _draw_daily(self, win, height, width):
         cur = self.app.config.tariff.currency
         series = self.data.daily_series(self.days)
-        header = f"Daily consumption — last {self.days} days"
+        header = f"按天用电量：最近 {self.days} 天"
         draw_box(win, 0, 0, height - 6, width, header,
                  color(CP_TITLE), color(CP_TITLE, bold=True))
 
-        cols = f"{'Date':<12}{'kWh':>9}  {'Cost':>10}  {'Avg W':>7}  "
-        safe_addstr(win, 1, 2, pad(cols + "Profile", width - 4),
+        cols = (
+            pad("日期", 12)
+            + rpad("电量/kWh", 9) + "  "
+            + rpad("电费", 10) + "  "
+            + rpad("平均功率", 9) + "  "
+        )
+        safe_addstr(win, 1, 2, pad(cols + "趋势", width - 4),
                     color(CP_DIM, bold=True))
 
         visible = height - 9
         total = len(series)
         self.scroll = max(0, min(self.scroll, max(0, total - visible)))
         peak = max((a.kwh for a in series), default=0.0) or 1.0
-        bar_width = max(8, width - 48)
+        bar_width = max(8, width - 50)
 
         for i in range(min(visible, total)):
             idx = self.scroll + i
@@ -78,18 +84,18 @@ class EnergyView(View):
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             y = 2 + i
             line = (
-                f"{agg.label:<12}"
-                f"{agg.kwh:>9.3f}  "
-                f"{agg.cost:>10.2f}  "
-                f"{agg.avg_watts:>7.0f}  "
+                f"{pad(agg.label, 12)}"
+                f"{rpad(f'{agg.kwh:.3f}', 9)}  "
+                f"{rpad(f'{agg.cost:.2f}', 10)}  "
+                f"{rpad(f'{agg.avg_watts:.0f}', 9)}  "
             )
-            safe_addstr(win, y, 2, pad(line, min(len(line), width - 4)), attr)
+            safe_addstr(win, y, 2, pad(line, min(cwidth(line), width - 4)), attr)
             if not selected and agg.kwh:
-                safe_addstr(win, y, 2 + len(line),
+                safe_addstr(win, y, 2 + cwidth(line),
                             hbar(agg.kwh, peak, bar_width),
                             color(CP_ACCENT))
             elif selected:
-                safe_addstr(win, y, 2 + len(line),
+                safe_addstr(win, y, 2 + cwidth(line),
                             pad(hbar(agg.kwh, peak, bar_width), bar_width), attr)
 
         self._draw_footer_totals(win, height, width, series, cur)
@@ -99,10 +105,10 @@ class EnergyView(View):
         total_cost = sum(a.cost for a in series)
         active = [a for a in series if a.kwh > 0]
         y = height - 5
-        draw_box(win, y, 0, 5, width, "Totals",
+        draw_box(win, y, 0, 5, width, "合计",
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         safe_addstr(win, y + 1, 2,
-                    f"{len(series)} days:  {total_kwh:.2f} kWh   "
+                    f"{len(series)} 天：{total_kwh:.2f} kWh   "
                     f"{total_cost:.2f} {cur}",
                     color(CP_OK, bold=True))
         if active:
@@ -110,16 +116,16 @@ class EnergyView(View):
             mean_cost = total_cost / len(active)
             safe_addstr(
                 win, y + 2, 2,
-                f"per active day:  {mean_day:.2f} kWh   {mean_cost:.2f} {cur}"
-                f"   ({len(active)} days with data)",
+                f"平均每天：{mean_day:.2f} kWh   {mean_cost:.2f} {cur}"
+                f"（有数据的 {len(active)} 天）",
                 color(CP_DIM),
             )
             monthly = mean_cost * 30
             annual = mean_cost * 365
             safe_addstr(
                 win, y + 3, 2,
-                f"at this rate:  {monthly:.0f} {cur}/month   "
-                f"{annual:.0f} {cur}/year",
+                f"按此推算：每月 {monthly:.0f} {cur}   "
+                f"每年 {annual:.0f} {cur}",
                 color(CP_WARN),
             )
 
@@ -128,16 +134,19 @@ class EnergyView(View):
     def _draw_hourly(self, win, height, width):
         cur = self.app.config.tariff.currency
         series = self.data.hourly_series(self.day)
-        header = f"Hourly consumption — {self.day.isoformat()}"
+        header = f"按小时用电量：{self.day.isoformat()}"
         draw_box(win, 0, 0, height - 6, width, header,
                  color(CP_TITLE), color(CP_TITLE, bold=True))
-        safe_addstr(win, 1, 2,
-                    pad(f"{'Hour':<8}{'kWh':>8}  {'Cost':>9}  {'Avg W':>7}  Profile",
-                        width - 4),
-                    color(CP_DIM, bold=True))
+        safe_addstr(
+            win, 1, 2,
+            pad(pad("时段", 8) + rpad("电量/kWh", 8) + "  "
+                + rpad("电费", 9) + "  " + rpad("平均功率", 9) + "  趋势",
+                width - 4),
+            color(CP_DIM, bold=True),
+        )
 
         peak = max((a.kwh for a in series), default=0.0) or 1.0
-        bar_width = max(8, width - 44)
+        bar_width = max(8, width - 46)
         visible = min(24, height - 9)
         for i in range(visible):
             if i >= len(series):
@@ -147,37 +156,37 @@ class EnergyView(View):
             selected = i == self.cursor
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             line = (
-                f"{agg.label:<8}"
-                f"{agg.kwh:>8.3f}  "
-                f"{agg.cost:>9.3f}  "
-                f"{agg.avg_watts:>7.0f}  "
+                f"{pad(agg.label, 8)}"
+                f"{rpad(f'{agg.kwh:.3f}', 8)}  "
+                f"{rpad(f'{agg.cost:.3f}', 9)}  "
+                f"{rpad(f'{agg.avg_watts:.0f}', 9)}  "
             )
             safe_addstr(win, y, 2, line, attr)
             if agg.kwh:
-                safe_addstr(win, y, 2 + len(line), hbar(agg.kwh, peak, bar_width),
+                safe_addstr(win, y, 2 + cwidth(line), hbar(agg.kwh, peak, bar_width),
                             color(CP_ACCENT) if not selected else attr)
 
         y = height - 5
-        draw_box(win, y, 0, 5, width, "Tariff breakdown",
+        draw_box(win, y, 0, 5, width, "分时电价明细",
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         start = dt.datetime.combine(self.day, dt.time.min)
         end = start + dt.timedelta(days=1) - dt.timedelta(seconds=1)
         rows = self.data.period_breakdown(start, end)
         if not rows:
-            safe_addstr(win, y + 1, 2, "No data for this day.", color(CP_DIM))
+            safe_addstr(win, y + 1, 2, "当天没有数据。", color(CP_DIM))
         else:
             x = 2
             for name, kwh, cost in rows[:4]:
-                block = f"{name}: {kwh:.2f} kWh / {cost:.2f} {cur}"
+                block = f"{name}：{kwh:.2f} kWh / {cost:.2f} {cur}"
                 safe_addstr(win, y + 1, x, block, color(CP_ACCENT))
-                x += len(block) + 4
+                x += cwidth(block) + 4
             day_total = sum(c for _, _, c in rows)
             day_kwh = sum(k for _, k, _ in rows)
             safe_addstr(win, y + 2, 2,
-                        f"day total: {day_kwh:.3f} kWh   {day_total:.2f} {cur}",
+                        f"当天合计：{day_kwh:.3f} kWh   {day_total:.2f} {cur}",
                         color(CP_OK, bold=True))
             safe_addstr(win, y + 3, 2,
-                        "← → change day    d: back to daily view",
+                        "← → 切换日期    d：返回按天视图",
                         color(CP_DIM))
 
     # ---------------- keys ----------------

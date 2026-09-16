@@ -1,4 +1,4 @@
-"""Sensors view: the full IPMI sensor table with filtering."""
+"""传感器视图：完整的 IPMI 传感器表，可按类别筛选。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ from ..widgets import (
     CP_TITLE,
     CP_WARN,
     color,
+    cwidth,
     draw_box,
     hbar,
     pad,
+    rpad,
     safe_addstr,
     status_attr,
     truncate,
@@ -25,10 +27,20 @@ from .base import View
 
 KINDS = ["all", "temperature", "voltage", "fan", "power", "current", "discrete"]
 
+KIND_LABELS = {
+    "all": "全部",
+    "temperature": "温度",
+    "voltage": "电压",
+    "fan": "风扇",
+    "power": "功率",
+    "current": "电流",
+    "discrete": "离散量",
+}
+
 
 class SensorsView(View):
-    title = "Sensors"
-    hotkeys = [("f", "filter"), ("o", "only faults")]
+    title = "传感器"
+    hotkeys = [("f", "筛选"), ("o", "只看故障")]
 
     def __init__(self, app):
         super().__init__(app)
@@ -49,15 +61,16 @@ class SensorsView(View):
         all_sensors = self.data.sensors or []
         faulted = [s for s in all_sensors if s.readable and not s.ok]
 
-        title = f"Sensors — filter: {KINDS[self.kind_index]}"
+        title = f"传感器（筛选：{KIND_LABELS[KINDS[self.kind_index]]}）"
         if self.faults_only:
-            title += " (faults only)"
+            title = title[:-1] + "，只看故障）"
         draw_box(win, 0, 0, height - 3, width, title,
                  color(CP_TITLE), color(CP_TITLE, bold=True))
         safe_addstr(
             win, 1, 2,
-            pad(f"{'Sensor':<20}{'Reading':>12} {'Unit':<11}{'St':<4}"
-                f"{'Crit':>9}  Headroom", width - 4),
+            pad(pad("传感器名称", 20) + rpad("读数", 12) + " "
+                + pad("单位", 11) + pad("状态", 6) + rpad("阈值", 9) + "  余量",
+                width - 4),
             color(CP_DIM, bold=True),
         )
 
@@ -76,18 +89,21 @@ class SensorsView(View):
             base = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
 
             value = f"{s.value:.2f}" if s.value is not None else "—"
+            # pad/rpad measure terminal columns, which `:<20` and `:>12`
+            # do not: those count characters and would misplace every
+            # column after a CJK sensor name.
             line = (
-                f"{truncate(s.name, 20):<20}"
-                f"{value:>12} "
-                f"{truncate(s.unit, 10):<11}"
+                pad(truncate(s.name, 20), 20)
+                + rpad(value, 12) + " "
+                + pad(truncate(s.unit, 10), 11)
             )
             safe_addstr(win, y, 2, line, base)
-            x = 2 + len(line)
-            safe_addstr(win, y, x, f"{s.status:<4}",
+            x = 2 + cwidth(line)
+            safe_addstr(win, y, x, pad(s.status, 6),
                         base if selected else status_attr(s.status))
-            x += 4
+            x += 6
             crit = f"{s.upper_crit:.1f}" if s.upper_crit is not None else "—"
-            safe_addstr(win, y, x, f"{crit:>9}  ", base)
+            safe_addstr(win, y, x, rpad(crit, 9) + "  ", base)
             x += 11
 
             # Headroom to critical, as a bar: the quickest way to spot a
@@ -104,7 +120,7 @@ class SensorsView(View):
                     bar_attr = color(CP_OK)
                 safe_addstr(win, y, x, hbar(s.value, s.upper_crit, bar_width),
                             base if selected else bar_attr)
-                safe_addstr(win, y, x + bar_width + 1, f"{headroom:+.0f}",
+                safe_addstr(win, y, x + bar_width + 1, rpad(f"{headroom:+.0f}", 4),
                             base if selected else color(CP_DIM))
 
         # ---- summary bar ----
@@ -113,19 +129,19 @@ class SensorsView(View):
         readable = [s for s in all_sensors if s.readable]
         temps = [s for s in readable if s.kind == "temperature"]
         fans = [s for s in readable if s.kind == "fan"]
-        parts = [f"{len(all_sensors)} sensors", f"{len(readable)} readable"]
+        parts = [f"共 {len(all_sensors)} 个传感器", f"{len(readable)} 个有读数"]
         if temps:
             hottest = max(temps, key=lambda s: s.value)
-            parts.append(f"hottest {hottest.name} {hottest.value:.0f}°C")
+            parts.append(f"最高温 {hottest.name} {hottest.value:.0f}°C")
         if fans:
-            parts.append(f"{len(fans)} fans, max {max(f.value for f in fans):.0f} RPM")
-        safe_addstr(win, y + 1, 2, truncate("   ".join(parts), width - 20),
+            parts.append(f"{len(fans)} 个风扇，最高 {max(f.value for f in fans):.0f} RPM")
+        safe_addstr(win, y + 1, 2, truncate("   ".join(parts), width - 24),
                     color(CP_NORMAL))
         if faulted:
-            safe_addstr(win, y + 1, width - 18,
-                        f"{len(faulted)} FAULTED", color(CP_CRIT, bold=True))
+            safe_addstr(win, y + 1, width - 22,
+                        f"{len(faulted)} 项故障", color(CP_CRIT, bold=True))
         else:
-            safe_addstr(win, y + 1, width - 18, "all nominal", color(CP_OK))
+            safe_addstr(win, y + 1, width - 22, "全部正常", color(CP_OK))
 
     def handle_key(self, key: int) -> bool:
         height, _ = self.app.content_size()

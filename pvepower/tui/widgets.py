@@ -4,6 +4,11 @@ Everything here is defensive about terminal size: curses raises on any
 write that touches the last cell of the screen, and a PVE console is
 often resized mid-session. `safe_addstr` is the only way this project
 writes text.
+
+The interface is in Chinese, so every width calculation counts terminal
+*columns*, not characters: a CJK glyph occupies two cells. Using len()
+would leave boxes broken and columns misaligned, so `cwidth`, `truncate`
+and `pad` below are the only correct way to measure or fit text.
 """
 
 from __future__ import annotations
@@ -11,6 +16,10 @@ from __future__ import annotations
 import curses
 import datetime as dt
 from typing import Optional, Sequence
+
+from ..textwidth import clip, cwidth
+from ..textwidth import lpad as _lpad
+from ..textwidth import rpad as _rpad
 
 # Colour pair ids.
 CP_NORMAL = 1
@@ -73,7 +82,7 @@ def safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
     if space <= 0:
         return
     try:
-        win.addstr(y, x, text[:space], attr)
+        win.addstr(y, x, clip(text, space), attr)
     except curses.error:
         pass
 
@@ -85,19 +94,22 @@ def safe_hline(win, y: int, x: int, char: str, length: int, attr: int = 0) -> No
 def truncate(text: str, width: int, ellipsis: str = "…") -> str:
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if cwidth(text) <= width:
         return text
-    if width <= len(ellipsis):
-        return text[:width]
-    return text[: width - len(ellipsis)] + ellipsis
+    ell = cwidth(ellipsis)
+    if width <= ell:
+        return clip(text, width)
+    return clip(text, width - ell) + ellipsis
 
 
 def pad(text: str, width: int) -> str:
-    return truncate(text, width).ljust(width)
+    """Left-align to `width` terminal columns, ellipsising if too long."""
+    return _lpad(truncate(text, width), width)
 
 
 def rpad(text: str, width: int) -> str:
-    return truncate(text, width).rjust(width)
+    """Right-align to `width` terminal columns, ellipsising if too long."""
+    return _rpad(truncate(text, width), width)
 
 
 def sparkline(values: Sequence[float], width: int) -> str:
@@ -173,20 +185,20 @@ def severity_attr(severity: str) -> int:
 def humanize_seconds(seconds: float) -> str:
     seconds = int(seconds)
     if seconds < 60:
-        return f"{seconds}s"
+        return f"{seconds}秒"
     if seconds < 3600:
-        return f"{seconds // 60}m{seconds % 60:02d}s"
+        return f"{seconds // 60}分{seconds % 60:02d}秒"
     if seconds < 86400:
-        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
-    return f"{seconds // 86400}d{(seconds % 86400) // 3600:02d}h"
+        return f"{seconds // 3600}小时{(seconds % 3600) // 60:02d}分"
+    return f"{seconds // 86400}天{(seconds % 86400) // 3600:02d}小时"
 
 
 def humanize_ago(ts: int, now: Optional[dt.datetime] = None) -> str:
     now = now or dt.datetime.now()
     delta = now.timestamp() - ts
     if delta < 0:
-        return "in the future"
-    return f"{humanize_seconds(delta)} ago"
+        return "时间在未来"
+    return f"{humanize_seconds(delta)}前"
 
 
 class Prompt:
@@ -221,20 +233,31 @@ class Prompt:
                 self.stdscr.clrtoeol()
                 shown = "*" * len(buffer) if secret else "".join(buffer)
                 safe_addstr(self.stdscr, row, 0, label, color(CP_TITLE, bold=True))
-                field_x = len(label) + 1
+                field_x = cwidth(label) + 1
                 safe_addstr(self.stdscr, row, field_x, shown, color(CP_NORMAL))
-                hint = "Enter=confirm  ESC=cancel"
+                hint = "Enter=确定  ESC=取消"
                 if error:
                     safe_addstr(self.stdscr, row + 1, 0, error, color(CP_CRIT, bold=True))
                 else:
                     safe_addstr(self.stdscr, row + 1, 0, hint, color(CP_DIM))
                 try:
-                    self.stdscr.move(row, min(field_x + cursor, width - 1))
+                    before = cwidth("".join(buffer[:cursor])) if not secret else cursor
+                    self.stdscr.move(row, min(field_x + before, width - 1))
                 except curses.error:
                     pass
                 self.stdscr.refresh()
 
-                key = self.stdscr.getch()
+                # get_wch returns a str for printable input, so a Chinese
+                # name can be typed; getch would hand back raw UTF-8 bytes
+                # one at a time and mangle it.
+                try:
+                    raw = self.stdscr.get_wch()
+                except curses.error:
+                    continue
+                if isinstance(raw, str):
+                    key = ord(raw) if len(raw) == 1 else -1
+                else:
+                    key = raw
                 if key == 27:  # ESC
                     return None
                 if key in (curses.KEY_ENTER, 10, 13):
@@ -263,8 +286,8 @@ class Prompt:
                     cursor = len(buffer)
                 elif key == 21:  # Ctrl-U
                     buffer, cursor = [], 0
-                elif 32 <= key < 127:
-                    buffer.insert(cursor, chr(key))
+                elif isinstance(raw, str) and raw.isprintable():
+                    buffer.insert(cursor, raw)
                     cursor += 1
                     error = ""
         finally:
@@ -277,7 +300,7 @@ def confirm(stdscr, question: str, danger: bool = False) -> bool:
     row = height - 2
     if danger:
         prompt = Prompt(stdscr)
-        answer = prompt.ask(f"{question} Type 'yes' to confirm:")
+        answer = prompt.ask(f"{question} 输入 yes 确认：")
         return answer is not None and answer.strip().lower() == "yes"
     while True:
         stdscr.move(row, 0)
@@ -297,7 +320,7 @@ def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
         return None
     height, width = stdscr.getmaxyx()
     box_h = min(len(options) + 4, height - 4)
-    box_w = min(max(len(title), max(len(o) for o in options)) + 8, width - 4)
+    box_w = min(max(cwidth(title), max(cwidth(o) for o in options)) + 8, width - 4)
     top = max(0, (height - box_h) // 2)
     left = max(0, (width - box_w) // 2)
     selected = 0
@@ -314,7 +337,7 @@ def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
                 break
             attr = color(CP_HIGHLIGHT) if idx == selected else color(CP_NORMAL)
             safe_addstr(win, 2 + i, 2, pad(options[idx], box_w - 4), attr)
-        safe_addstr(win, box_h - 1, 2, " ↑↓ Enter ESC ", color(CP_DIM))
+        safe_addstr(win, box_h - 1, 2, " ↑↓ 选择  Enter 确定  ESC 取消 ", color(CP_DIM))
         win.refresh()
         key = win.getch()
         if key in (curses.KEY_UP, ord("k")):
@@ -334,7 +357,10 @@ def show_message(stdscr, title: str, body: str, is_error: bool = False) -> None:
         lines.append(raw)
     height, width = stdscr.getmaxyx()
     box_h = min(max(len(lines) + 4, 6), height - 2)
-    box_w = min(max(len(title) + 6, max((len(l) for l in lines), default=20) + 6), width - 2)
+    box_w = min(
+        max(cwidth(title) + 6, max((cwidth(l) for l in lines), default=20) + 6),
+        width - 2,
+    )
     top = max(0, (height - box_h) // 2)
     left = max(0, (width - box_w) // 2)
     offset = 0
@@ -351,9 +377,10 @@ def show_message(stdscr, title: str, body: str, is_error: bool = False) -> None:
                 break
             safe_addstr(win, 2 + i, 2, truncate(lines[idx], box_w - 4),
                         color(CP_NORMAL))
-        footer = " any key to close "
+        footer = " 按任意键关闭 "
         if len(lines) > visible:
-            footer = f" {offset + 1}-{min(offset + visible, len(lines))}/{len(lines)}  ↑↓ close:q "
+            footer = (f" {offset + 1}-{min(offset + visible, len(lines))}/{len(lines)}"
+                      "  ↑↓ 滚动  q 关闭 ")
         safe_addstr(win, box_h - 1, 2, footer, color(CP_DIM))
         win.refresh()
         key = win.getch()

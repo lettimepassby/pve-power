@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import curses
 import datetime as dt
+import locale
 import os
 import time
 from typing import Optional
@@ -34,6 +35,7 @@ from .widgets import (
     Prompt,
     color,
     confirm,
+    cwidth,
     init_colors,
     pad,
     safe_addstr,
@@ -41,57 +43,62 @@ from .widgets import (
     truncate,
 )
 
+# 七个中文标签页（总览 电量 传感器 BMC 用户 事件日志 电价）加上序号后
+# 一共占 61 列，所以最小宽度取 62，否则最右边的「电价」会被挤掉。
+MIN_WIDTH = 62
+MIN_HEIGHT = 12
+
 HELP_TEXT = """\
-Navigation
-  Tab / Shift-Tab     next / previous tab
-  1 .. 7              jump straight to a tab
-  ↑ ↓ / k j           move within a list
-  PgUp PgDn g G       page and jump to ends
-  r                   refresh everything now
-  q                   quit
+导航
+  Tab / Shift-Tab     下一个 / 上一个标签页
+  1 .. 7              直接跳到对应标签页
+  ↑ ↓ / k j           在列表中移动
+  PgUp PgDn g G       翻页、跳到首尾
+  r                   立即刷新全部数据
+  q                   退出
 
-Overview
-  Live power draw, today's and this month's consumption and cost,
-  chassis health, and whether the collector is keeping up.
+总览
+  实时功率、今日与本月的用电量和电费、机箱健康状况，
+  以及采集器是否在正常工作。
 
-Energy
-  d / h               daily or hourly view
-  Enter               drill into the selected day
-  ← →                 previous / next day (hourly view)
-  [ ]                 shrink / grow the date range
-  e                   export the visible range to CSV
+电量
+  d / h               按天 / 按小时查看
+  Enter               钻取选中那一天
+  ← →                 上一天 / 下一天（小时视图）
+  [ ]                 缩小 / 扩大日期范围
+  e                   把当前范围导出为 CSV
 
-Sensors
-  f / F               cycle the sensor-kind filter
-  o                   show only sensors out of spec
+传感器
+  f / F               切换传感器类别筛选
+  o                   只看超出规格的传感器
 
 BMC
-  Enter               edit the selected LAN field
-  c                   chassis power action
-  p                   power restore policy after AC loss
-  i                   blink the identify LED
+  Enter               编辑选中的网络字段
+  c                   机箱电源操作
+  p                   断电恢复后的上电策略
+  i                   闪烁定位指示灯
 
-Users
-  p                   set password        n   rename
-  v                   privilege level     e/d enable / disable
+用户
+  p                   设置密码            n   改名
+  v                   权限级别            e/d 启用 / 禁用
 
-Event Log
-  o                   show only warnings and faults
-  X                   erase the BMC event log
+事件日志
+  o                   只看告警和故障
+  X                   清空 BMC 事件日志
 
-Tariff
-  Enter               edit the selected setting
-  m                   switch between flat and time-of-use
-  a / x               add / remove a period or tier
-  P                   load the sample Chinese TOU preset
-  s                   save the configuration to disk
-  R                   recompute stored costs under the current tariff
+电价
+  Enter               编辑选中的设置项
+  m                   在单一电价和分时电价之间切换
+  a / x               添加 / 删除一个时段或阶梯
+  P                   载入示例分时电价方案
+  s                   保存配置到磁盘
+  R                   按当前电价重算已存储的费用
 
-Notes
-  Energy is integrated from power samples with the trapezoidal rule.
-  Cost is recorded at the price in force when each sample was taken, so
-  changing the tariff later does not rewrite history — use R for that,
-  and only when the old prices were wrong rather than merely older.
+说明
+  电量由功率采样用梯形法积分得出。
+  每笔费用按该采样时刻生效的电价记录，所以之后修改电价
+  不会篡改历史账目 —— 需要重算时用 R，且仅在旧电价本身
+  填错的情况下使用，而不是因为它只是"旧"。
 """
 
 
@@ -120,6 +127,13 @@ class App:
     # ---------------- lifecycle ----------------
 
     def run(self) -> int:
+        # curses needs the locale set before initscr, or wide characters
+        # are written as raw bytes and the Chinese labels come out as
+        # mojibake. The empty string means "whatever the environment says".
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            pass
         return curses.wrapper(self._main)
 
     def _main(self, stdscr) -> int:
@@ -171,9 +185,9 @@ class App:
         height, width = stdscr.getmaxyx()
         stdscr.erase()
 
-        if height < 12 or width < 60:
+        if height < 12 or width < MIN_WIDTH:
             safe_addstr(stdscr, 0, 0,
-                        f"Terminal too small: {width}x{height}, need 60x12",
+                        f"终端窗口太小：{width}x{height}，至少需要 {MIN_WIDTH}x{MIN_HEIGHT}",
                         color(CP_CRIT, bold=True))
             stdscr.refresh()
             return
@@ -192,7 +206,7 @@ class App:
         stdscr.refresh()
 
     def _draw_header(self, stdscr, width: int) -> None:
-        host = self.config.ipmi.host or "local"
+        host = self.config.ipmi.host or "本机"
         fru = self.data.fru or {}
         product = fru.get("Product Name", "")
         title = f" pve-power  {product} @ {host} "
@@ -200,19 +214,20 @@ class App:
 
         watts = self.data.current_watts()
         if watts is not None:
-            badge = f" {watts:.0f} W  {self.data.today.cost:.2f} " \
-                    f"{self.config.tariff.currency} today "
-            safe_addstr(stdscr, 0, max(0, width - len(badge) - 1), badge,
+            badge = f" {watts:.0f} W  今日 {self.data.today.cost:.2f} " \
+                    f"{self.config.tariff.currency} "
+            safe_addstr(stdscr, 0, max(0, width - cwidth(badge) - 1), badge,
                         color(CP_HEADER, bold=True))
 
         x = 0
         for idx, view in enumerate(self.views):
             label = f" {idx + 1}:{view.title} "
+            # 宽度不够时整块跳过，而不是画一半再被裁掉
+            if x + cwidth(label) > width - 1:
+                break
             attr = color(CP_HIGHLIGHT, bold=True) if idx == self.active else color(CP_DIM)
             safe_addstr(stdscr, 1, x, label, attr)
-            x += len(label)
-            if x >= width:
-                break
+            x += cwidth(label)
 
     def _draw_footer(self, stdscr, height: int, width: int) -> None:
         y = height - 2
@@ -222,16 +237,16 @@ class App:
             safe_addstr(stdscr, y + 1, 1, truncate(self._flash, width - 2), attr)
             return
 
-        keys = [("Tab", "switch"), ("r", "refresh"), ("?", "help"), ("q", "quit")]
+        keys = [("Tab", "切换"), ("r", "刷新"), ("?", "帮助"), ("q", "退出")]
         keys = list(self.views[self.active].hotkeys) + keys
         x = 1
         for key, label in keys:
-            if x + len(key) + len(label) + 3 >= width:
+            if x + cwidth(key) + cwidth(label) + 3 >= width:
                 break
             safe_addstr(stdscr, y + 1, x, key, color(CP_ACCENT, bold=True))
-            x += len(key)
+            x += cwidth(key)
             safe_addstr(stdscr, y + 1, x, f":{label}  ", color(CP_DIM))
-            x += len(label) + 3
+            x += cwidth(label) + 3
 
         clock = dt.datetime.now().strftime("%H:%M:%S")
         safe_addstr(stdscr, y + 1, max(0, width - len(clock) - 1), clock,
@@ -257,9 +272,9 @@ class App:
             for kind in list(self.data._fetched):
                 self.data.invalidate(kind)
             self.data.refresh_energy()
-            self.flash("Refreshed")
+            self.flash("已刷新")
         elif key == ord("?"):
-            show_message(self.stdscr, "pve-power — keys and behaviour", HELP_TEXT)
+            show_message(self.stdscr, "pve-power — 按键与说明", HELP_TEXT)
         elif key == curses.KEY_RESIZE:
             curses.update_lines_cols()
 
@@ -275,17 +290,17 @@ class App:
         if problems:
             show_message(
                 self.stdscr,
-                "Configuration not saved",
-                "Fix these first:\n\n" + "\n".join(f"  • {p}" for p in problems),
+                "配置未保存",
+                "请先修正以下问题：\n\n" + "\n".join(f"  • {p}" for p in problems),
                 is_error=True,
             )
             return
         try:
             self.config.save(self.config_path)
             self.storage.log_event("config_saved", self.config_path)
-            self.flash(f"Saved to {self.config_path}", ok=True)
+            self.flash(f"已保存到 {self.config_path}", ok=True)
         except OSError as exc:
-            show_message(self.stdscr, "Could not write configuration", str(exc),
+            show_message(self.stdscr, "无法写入配置文件", str(exc),
                          is_error=True)
 
     def export_csv(self) -> None:
@@ -294,7 +309,7 @@ class App:
             os.path.expanduser("~"),
             f"pve-power-{dt.date.today().isoformat()}.csv",
         )
-        path = prompt.ask("Export daily totals to:", default)
+        path = prompt.ask("导出每日汇总到：", default)
         if not path:
             return
         path = os.path.expanduser(path.strip())
@@ -320,9 +335,9 @@ class App:
                         agg.samples,
                         agg.duration_s,
                     ])
-            self.flash(f"Exported {len(series)} days to {path}", ok=True)
+            self.flash(f"已导出 {len(series)} 天到 {path}", ok=True)
         except OSError as exc:
-            show_message(self.stdscr, "Export failed", str(exc), is_error=True)
+            show_message(self.stdscr, "导出失败", str(exc), is_error=True)
 
 
 def run(config: Config, config_path: str) -> int:

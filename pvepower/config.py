@@ -77,8 +77,8 @@ class TariffConfig:
                 if period.matches(when):
                     return period.price, period.name
             # No window matched: fall back rather than bill at zero.
-            return self.flat_price, "unmatched"
-        return self.flat_price, "flat"
+            return self.flat_price, "未匹配时段"
+        return self.flat_price, "单一电价"
 
     def tier_surcharge(self, month_to_date_kwh: float) -> tuple[float, str]:
         """Surcharge per kWh for the tier that `month_to_date_kwh` falls in."""
@@ -86,9 +86,9 @@ class TariffConfig:
             return 0.0, ""
         for tier in self.tiers:
             if tier.limit_kwh is None or month_to_date_kwh < tier.limit_kwh:
-                return tier.surcharge, tier.name or f"<{tier.limit_kwh}"
+                return tier.surcharge, tier.name or f"低于 {tier.limit_kwh}"
         last = self.tiers[-1]
-        return last.surcharge, last.name or "top"
+        return last.surcharge, last.name or "最高阶梯"
 
     def price_at(self, when: dt.datetime, month_to_date_kwh: float = 0.0) -> float:
         """Effective per-kWh price, including any tier surcharge."""
@@ -100,7 +100,7 @@ class TariffConfig:
         base, label = self.base_price(when)
         surcharge, tier_label = self.tier_surcharge(month_to_date_kwh)
         if surcharge:
-            return f"{label} {base:.4f} + {tier_label} {surcharge:.4f}"
+            return f"{label} {base:.4f} + {tier_label} 加价 {surcharge:.4f}"
         return f"{label} {base:.4f}"
 
 
@@ -214,44 +214,44 @@ class Config:
         """Return a list of human-readable problems; empty means valid."""
         problems: list[str] = []
         if self.collector.interval_seconds < 5:
-            problems.append("collector.interval_seconds must be >= 5")
+            problems.append("采集间隔 collector.interval_seconds 必须 >= 5")
         if self.collector.max_gap_seconds <= self.collector.interval_seconds:
             problems.append(
-                "collector.max_gap_seconds must exceed collector.interval_seconds"
+                "缺口阈值 collector.max_gap_seconds 必须大于采集间隔 collector.interval_seconds"
             )
         if self.tariff.mode not in ("flat", "tou"):
-            problems.append("tariff.mode must be 'flat' or 'tou'")
+            problems.append("电价模式 tariff.mode 必须是 'flat' 或 'tou'")
         if self.tariff.mode == "tou":
             if not self.tariff.tou_periods:
-                problems.append("tariff.mode is 'tou' but no periods are defined")
+                problems.append("电价模式为 'tou'（分时电价），但没有定义任何时段")
             covered: set[int] = set()
             for period in self.tariff.tou_periods:
                 for hour in period.hours:
                     if not 0 <= hour <= 23:
                         problems.append(
-                            f"tou period '{period.name}' has invalid hour {hour}"
+                            f"分时时段「{period.name}」的小时数 {hour} 无效（应在 0-23 之间）"
                         )
                 if not period.days:
                     covered.update(period.hours)
             missing = sorted(set(range(24)) - covered)
             if missing and not any(p.days for p in self.tariff.tou_periods):
                 problems.append(
-                    f"tou periods leave hours uncovered: {missing} "
-                    "(they will bill at flat_price)"
+                    f"分时时段未覆盖以下小时：{missing}"
+                    "（这些小时将按基础电价 flat_price 计费）"
                 )
         if self.tariff.tiered_enabled:
             if not self.tariff.tiers:
-                problems.append("tariff.tiered_enabled is true but no tiers defined")
+                problems.append("启用了阶梯电价 tariff.tiered_enabled，但没有定义任何阶梯")
             bounded = [t for t in self.tariff.tiers if t.limit_kwh is not None]
             limits = [t.limit_kwh for t in bounded]
             if limits != sorted(limits):
-                problems.append("tariff.tiers must be ordered by ascending limit_kwh")
+                problems.append("阶梯必须按 limit_kwh 从小到大排列")
             if self.tariff.tiers and self.tariff.tiers[-1].limit_kwh is not None:
                 problems.append(
-                    "the last tariff tier should have limit_kwh=null (unbounded)"
+                    "最后一个阶梯的 limit_kwh 应为 null（表示不设上限）"
                 )
         if self.tariff.flat_price < 0:
-            problems.append("tariff.flat_price must be >= 0")
+            problems.append("基础电价 tariff.flat_price 必须 >= 0")
         return problems
 
 

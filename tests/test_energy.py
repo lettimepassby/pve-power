@@ -240,7 +240,7 @@ class TestConfigValidation(unittest.TestCase):
             tou_periods=[TouPeriod(name="only-morning", price=1.0, hours=[8, 9])],
         )
         problems = cfg.validate()
-        self.assertTrue(any("uncovered" in p for p in problems))
+        self.assertTrue(any("未覆盖" in p for p in problems))
 
     def test_unordered_tiers_are_reported(self):
         cfg = Config()
@@ -253,7 +253,7 @@ class TestConfigValidation(unittest.TestCase):
             ],
         )
         problems = cfg.validate()
-        self.assertTrue(any("ascending" in p for p in problems))
+        self.assertTrue(any("从小到大" in p for p in problems))
 
     def test_gap_shorter_than_interval_is_reported(self):
         cfg = Config()
