@@ -73,6 +73,56 @@ class Sensor:
 
 
 @dataclass
+class FanReading:
+    """One fan tachometer, plus its slot and duty cycle when derivable.
+
+    `percent` is a *derived* figure, not a BMC reading: this platform has
+    no duty-cycle sensor (see `FanControl.probe`), so it is computed from
+    RPM against the highest speed observed on this chassis. It answers
+    "how hard is this fan working relative to its peers", which is what a
+    human wants when the room is loud, and it is labelled as derived in
+    the UI so it is never mistaken for a control setpoint.
+    """
+
+    name: str
+    rpm: Optional[float]
+    status: str
+    slot: str = ""
+    position: str = ""
+
+    @property
+    def present(self) -> bool:
+        """False for an empty bay: 'ns'/no-reading is absence, not failure."""
+        return self.rpm is not None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    def percent_of(self, reference_rpm: float) -> Optional[float]:
+        if self.rpm is None or reference_rpm <= 0:
+            return None
+        return min(100.0, self.rpm / reference_rpm * 100.0)
+
+
+@dataclass
+class FanControl:
+    """What fan control, if any, this BMC actually exposes.
+
+    Vendors put manual fan control behind OEM netfns that differ per
+    model *and* per firmware build, and none of it is discoverable from
+    the IPMI spec. So rather than shipping a button that silently does
+    nothing, the TUI probes for each known command family and reports
+    what it found. `supported` is False unless a probe actually answered.
+    """
+
+    supported: bool = False
+    method: str = ""
+    detail: str = ""
+    probed: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class PowerReading:
     instantaneous: Optional[int] = None
     minimum: Optional[int] = None
@@ -288,6 +338,93 @@ class IpmiTool:
                 )
             )
         return sensors
+
+    # ---------------- fans ----------------
+
+    # Each entry is (label, netfn, cmd). A BMC answers 0xc1 "invalid
+    # command" for a netfn/cmd pair it does not implement, and some other
+    # completion code (commonly 0xc7 "request data length invalid") when
+    # the command exists but wants arguments. That distinction is the only
+    # non-destructive way to ask "do you support this?", because it is
+    # answered without sending any argument bytes -- so nothing executes.
+    FAN_CONTROL_PROBES = [
+        ("Inspur 风扇模式 (0x3a 0x07)", "0x3a", "0x07"),
+        ("Inspur/曙光 散热策略 (0x3a 0x0b)", "0x3a", "0x0b"),
+        ("Inspur/曙光 转速设置 (0x3a 0x0d)", "0x3a", "0x0d"),
+        ("AMI 读取转速档 (0x3a 0xd7)", "0x3a", "0xd7"),
+        ("AMI 读取占空比 (0x3a 0xda)", "0x3a", "0xda"),
+        ("通用 手动/自动切换 (0x3c 0x2f)", "0x3c", "0x2f"),
+        ("通用 设置占空比 (0x3c 0x2d)", "0x3c", "0x2d"),
+        ("通用 读取占空比 (0x3c 0x2e)", "0x3c", "0x2e"),
+        ("Dell/超微 风扇模式 (0x30 0x30)", "0x30", "0x30"),
+        ("Dell 散热策略 (0x30 0xce)", "0x30", "0xce"),
+    ]
+
+    @staticmethod
+    def fans_from_sensors(sensors: list[Sensor]) -> list[FanReading]:
+        """Pick the fans out of an already-fetched sensor table.
+
+        Kept separate from `fans()` so the TUI can derive fan readings
+        from the sensor table it has already cached, instead of paying
+        for a second `ipmitool sensor` call (measured 5-7s on this BMC).
+        """
+        readings: list[FanReading] = []
+        for sensor in sensors:
+            if sensor.kind != "fan":
+                continue
+            slot, position = "", ""
+            m = re.match(r"FAN_?(\d+)_?(\w+)?", sensor.name, re.IGNORECASE)
+            if m:
+                slot = m.group(1)
+                position = (m.group(2) or "").capitalize()
+            readings.append(
+                FanReading(
+                    name=sensor.name,
+                    rpm=sensor.value,
+                    status=sensor.status,
+                    slot=slot,
+                    position=position,
+                )
+            )
+        return readings
+
+    def fans(self) -> list[FanReading]:
+        """Fan tachometers, read from the threshold sensor table.
+
+        Uses `sensor` rather than `sdr type fan`: they carry the same
+        tachometer values, but `sdr type` re-walks the SDR repository on
+        every call and measured 19s here against 5s for `sensor`.
+        """
+        return self.fans_from_sensors(self.sensors())
+
+    def probe_fan_control(self) -> FanControl:
+        """Ask the BMC which manual fan-control commands it implements.
+
+        Read-only: every probe is sent with no argument bytes, so a
+        command that does exist rejects it on length rather than acting.
+        """
+        result = FanControl()
+        for label, netfn, cmd in self.FAN_CONTROL_PROBES:
+            ok, out = self.try_run("raw", netfn, cmd)
+            if ok:
+                # Answered outright: the command exists and took no args.
+                result.probed.append((label, "支持"))
+                if not result.supported:
+                    result.supported = True
+                    result.method = label
+                    result.detail = out.strip()
+            elif "0xc1" in out:
+                result.probed.append((label, "不支持"))
+            elif "rsp=0xc7" in out or "0xc7" in out:
+                # Exists, but needs arguments we do not know the shape of.
+                result.probed.append((label, "存在但参数未知"))
+                if not result.supported:
+                    result.supported = True
+                    result.method = label
+                    result.detail = "命令存在，但参数格式未公开"
+            else:
+                result.probed.append((label, "未知响应"))
+        return result
 
     # ---------------- inventory ----------------
 

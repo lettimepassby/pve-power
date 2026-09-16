@@ -17,6 +17,7 @@ from .data import DataCache
 from .views.base import View
 from .views.bmc import BmcView
 from .views.energy import EnergyView
+from .views.fans import FansView
 from .views.overview import OverviewView
 from .views.sel import SelView
 from .views.sensors import SensorsView
@@ -43,15 +44,15 @@ from .widgets import (
     truncate,
 )
 
-# 七个中文标签页（总览 电量 传感器 BMC 用户 事件日志 电价）加上序号后
-# 一共占 61 列，所以最小宽度取 62，否则最右边的「电价」会被挤掉。
-MIN_WIDTH = 62
+# 八个中文标签页（总览 电量 传感器 风扇 BMC 用户 事件日志 电价）加上序号
+# 后一共占 69 列，所以最小宽度取 70，否则最右边的「电价」会被挤掉。
+MIN_WIDTH = 70
 MIN_HEIGHT = 12
 
 HELP_TEXT = """\
 导航
   Tab / Shift-Tab     下一个 / 上一个标签页
-  1 .. 7              直接跳到对应标签页
+  1 .. 8              直接跳到对应标签页
   ↑ ↓ / k j           在列表中移动
   PgUp PgDn g G       翻页、跳到首尾
   r                   立即刷新全部数据
@@ -71,6 +72,11 @@ HELP_TEXT = """\
 传感器
   f / F               切换传感器类别筛选
   o                   只看超出规格的传感器
+
+风扇
+  p                   探测 BMC 是否支持手动调速
+  转速与占空比来自传感器表；占空比是按额定转速折算的，
+  不是 BMC 的设定值 —— 这台机器的固件没有开放调速接口。
 
 BMC
   Enter               编辑选中的网络字段
@@ -151,6 +157,7 @@ class App:
             OverviewView(self),
             EnergyView(self),
             SensorsView(self),
+            FansView(self),
             BmcView(self),
             UsersView(self),
             SelView(self),
@@ -242,7 +249,11 @@ class App:
             return
 
         keys = [("Tab", "切换"), ("r", "刷新"), ("?", "帮助"), ("q", "退出")]
-        keys = list(self.views[self.active].hotkeys) + keys
+        # 视图自己声明的热键排在前面；重复的（比如总览也声明了 r）只留一个，
+        # 否则页脚会出现两个「r:刷新」。
+        seen = {key for key, _ in keys}
+        keys = [pair for pair in self.views[self.active].hotkeys
+                if pair[0] not in seen] + keys
         x = 1
         for key, label in keys:
             if x + cwidth(key) + cwidth(label) + 3 >= width:

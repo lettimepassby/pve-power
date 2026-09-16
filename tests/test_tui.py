@@ -33,8 +33,8 @@ SIZES = [
     (24, 80),    # the classic default
     (30, 120),   # a comfortable console
     (60, 200),   # wide
-    (24, 63),    # one column above the declared minimum
-    (13, 62),    # one row above the declared minimum, at exactly the minimum width
+    (24, 71),    # one column above the declared minimum
+    (13, 70),    # one row above the declared minimum, at exactly the minimum width
     (10, 40),    # below the minimum: must show the size warning, not crash
 ]
 

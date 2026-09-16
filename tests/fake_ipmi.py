@@ -46,11 +46,26 @@ class FakeIpmi:
             Sensor("82599_Temp", None, "discrete", "ns"),
             Sensor("SYS_12V", 12.03, "Volts", "ok", upper_crit=13.0),
             Sensor("SYS_3.3V", 3.27, "Volts", "ok", upper_crit=3.6),
-            Sensor("FAN1_F_Speed", 8400.0, "RPM", "ok", upper_crit=20000.0),
-            Sensor("FAN2_F_Speed", 8600.0, "RPM", "ok", upper_crit=20000.0),
+            Sensor("FAN_0_Front", 8400.0, "RPM", "ok", upper_crit=20000.0),
+            Sensor("FAN_0_Rear", 8600.0, "RPM", "ok", upper_crit=20000.0),
+            # An unpopulated bay: reads as absent, not as a fault.
+            Sensor("FAN_3_Front", None, "RPM", "ns"),
             Sensor("PSU0_PIN", 190.0, "Watts", "ok"),
             Sensor("CPU0_Status", None, "discrete", "ok"),
         ]
+
+    def probe_fan_control(self):
+        from pvepower.ipmi import FanControl
+        if self.failing:
+            self._fail()
+        return FanControl(
+            supported=False,
+            probed=[("Inspur 风扇模式 (0x3a 0x07)", "不支持")],
+        )
+
+    def fans(self):
+        from pvepower.ipmi import IpmiTool
+        return IpmiTool.fans_from_sensors(self.sensors())
 
     def try_run(self, *args):
         if self.failing:

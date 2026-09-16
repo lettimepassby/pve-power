@@ -22,12 +22,24 @@ from ..storage import Aggregate, Storage
 
 # Seconds between refreshes, per data kind. Power moves constantly;
 # inventory essentially never does.
+#
+# `energy` reads SQLite, not the BMC: measured at 0.006s for the whole
+# refresh, against 5-7s for a `sensor` call. It was on a 30s interval,
+# which meant the overview's "上次采样" age was computed from a sample
+# record up to 30s old -- so with a 5s collector interval (staleness
+# threshold 3x = 15s) the panel accused a perfectly healthy collector of
+# having stalled. Refreshing it every 5s costs nothing and makes the age
+# honest.
+#
+# `sensors` is the expensive one: `ipmitool sensor` measured 5-7s on this
+# BMC, and the fan tab reads from the same cached table.
 INTERVALS = {
     "power": 5,
     "sensors": 15,
     "chassis": 20,
-    "energy": 30,
+    "energy": 5,
     "sel": 60,
+    "fan_control": 3600,
     "users": 120,
     "lan": 120,
     "identity": 600,
@@ -87,6 +99,22 @@ class DataCache:
     @property
     def users(self):
         return self._values.get("users")
+
+    @property
+    def fans(self):
+        """Fan readings, derived from the cached sensor table.
+
+        Reuses the sensors already fetched for the sensors tab, so
+        opening the fan tab costs no extra BMC round-trip.
+        """
+        sensors = self._values.get("sensors")
+        if sensors is None:
+            return None
+        return IpmiTool.fans_from_sensors(sensors)
+
+    @property
+    def fan_control(self):
+        return self._values.get("fan_control")
 
     @property
     def sel_entries(self):
@@ -195,6 +223,11 @@ class DataCache:
         if kind == "users":
             try:
                 return self.ipmi.users(self.config.ipmi.lan_channel)
+            except IpmiError:
+                return None
+        if kind == "fan_control":
+            try:
+                return self.ipmi.probe_fan_control()
             except IpmiError:
                 return None
         if kind == "sel":
