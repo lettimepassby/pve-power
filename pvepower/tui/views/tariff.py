@@ -118,6 +118,8 @@ class TariffView(View):
             ("tiered", "阶梯电价", "开" if t.tiered_enabled else "关"),
             ("interval", "采样间隔", f"{c.interval_seconds} 秒"),
             ("gap", "缺口阈值", f"{c.max_gap_seconds} 秒"),
+            ("retention", "原始数据保留",
+             f"{c.retention_days} 天" if c.retention_days else "不限制"),
         ]
         return rows
 
@@ -381,6 +383,29 @@ class TariffView(View):
             )
             if value is not None:
                 cfg.collector.max_gap_seconds = int(value.strip())
+        elif field == "retention":
+            # 轮换只删原始采样；天级汇总（daily_rollup）永久保留，
+            # 所以这里改小不会让历史电费统计消失，只是没有分钟级细节了。
+            def _validate_retention(v: str) -> str:
+                v = v.strip()
+                if v in ("", "0", "不限制"):
+                    return ""
+                if not v.isdigit():
+                    return "请输入整数天数，或留空表示不限制"
+                if int(v) < 7:
+                    return "保留天数不能少于 7 天"
+                return ""
+
+            current = (str(cfg.collector.retention_days)
+                       if cfg.collector.retention_days else "")
+            value = prompt.ask(
+                "原始采样保留多少天？（留空＝不限制；天级汇总始终保留）",
+                current, validator=_validate_retention,
+            )
+            if value is not None:
+                v = value.strip()
+                cfg.collector.retention_days = int(v) if v and v != "0" else None
+                self.app.flash("新的保留天数要重启采集器后才会生效")
 
         problems = cfg.validate()
         if problems:

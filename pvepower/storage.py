@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import sqlite3
+from threading import local as _ThreadLocal
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -115,20 +116,39 @@ class Aggregate:
 
 
 class Storage:
+    """SQLite-backed sample store.
+
+    Each thread gets its own connection. sqlite3 forbids sharing one
+    connection across threads, and the TUI refreshes energy figures on a
+    worker thread while drawing on the main one; a single shared
+    connection makes that a crash rather than a race. WAL means the
+    extra readers cost nothing and never block the collector's writes.
+    """
+
     def __init__(self, path: str):
         self.path = path
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        self.conn = sqlite3.connect(path, timeout=30.0)
-        self.conn.row_factory = sqlite3.Row
-        # WAL lets the TUI read while the collector writes.
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.executescript(SCHEMA)
+        self._local = _ThreadLocal()
+        conn = self.conn
+        conn.executescript(SCHEMA)
         self._migrate()
         self._set_meta_default("schema_version", str(SCHEMA_VERSION))
-        self.conn.commit()
+        conn.commit()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            # WAL lets the TUI read while the collector writes.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._local.conn = conn
+        return conn
 
     def _migrate(self) -> None:
         """Upgrade existing databases to the current schema version."""
@@ -150,7 +170,17 @@ class Storage:
             )
 
     def close(self) -> None:
-        self.conn.close()
+        """Close this thread's connection.
+
+        Worker threads' connections are closed by the garbage collector
+        when the thread ends; there is no portable way to reach into
+        another thread's local storage, and sqlite3 cleans up on
+        finalisation anyway.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
 
     def __enter__(self) -> "Storage":
         return self
