@@ -442,6 +442,76 @@ def confirm(stdscr, question: str, danger: bool = False) -> bool:
             return False
 
 
+# 看到 ESC 之后再等多久，用来区分「单独按了 ESC」和「方向键序列的开头」。
+# ncurses 自己的 ESCDELAY 默认是 1 秒，对人手来说太长了；50ms 足够让同一次
+# 按键的后续字节到齐，又不会让按 ESC 取消有可感的迟滞。
+ESC_PEEK_MS = 50
+
+# 普通模式（未收到 smkx 的终端）下方向键序列的末字节。
+_ESC_FINAL = {
+    ord("A"): curses.KEY_UP,
+    ord("B"): curses.KEY_DOWN,
+    ord("C"): curses.KEY_RIGHT,
+    ord("D"): curses.KEY_LEFT,
+    ord("H"): curses.KEY_HOME,
+    ord("F"): curses.KEY_END,
+}
+
+
+def _enable_keys(win) -> None:
+    """让这个窗口认识方向键。
+
+    keypad 在 ncurses 里是**按窗口**的属性，不是全局的。app 给 stdscr 开了
+    keypad(True)，但弹窗是 curses.newwin() 新建的，新窗口默认是关的 ——
+    于是方向键不会被翻译成 KEY_UP/KEY_DOWN，而是以原始转义序列逐字节
+    到达。第一个字节是 27，正好被 choose() 当成「取消」，结果就是按一下
+    方向键菜单直接关掉。
+    """
+    try:
+        win.keypad(True)
+    except curses.error:
+        # 极少数终端类型上会失败。方向键用不了，但 j/k 和 Enter 还在，
+        # 不该因此让弹窗开不出来。
+        pass
+
+
+def _read_key(win) -> int:
+    """读一个按键，并把终端没帮忙翻译的方向键序列补上。
+
+    keypad 开着时，ncurses 认得**应用模式**的方向键（ESC O A/B）——
+    终端收到 smkx 之后发的就是这一种，绝大多数情况走的是这条路。
+
+    但有的终端不理会 smkx，照发**普通模式**的 ESC [ A/B。那串在 ncurses
+    的 terminfo 里没有对应项，于是原样吐出三个字节，而头一个 27 会被
+    choose() 读成「ESC＝取消」——一按方向键菜单就关，和完全没修一样。
+    所以这里在看到 ESC 之后再探一下：后面紧跟着字节就是序列，什么都没有
+    才是真的按了 ESC。
+    """
+    key = win.getch()
+    if key != 27:
+        return key
+    win.timeout(ESC_PEEK_MS)
+    try:
+        nxt = win.getch()
+        if nxt == -1:
+            return 27                       # 真的只按了 ESC
+        if nxt in (ord("["), ord("O")):
+            return _ESC_FINAL.get(win.getch(), -1)
+        # ESC 后面跟的不是序列引导符，说明那是一个独立的 ESC（取消），
+        # 后面那个键是另一次独立按键 —— 退回去，下一轮再读。
+        #
+        # 不退回去、直接返回 -1 会死循环：连按两下 ESC 时，第一个 ESC 探到
+        # 第二个 ESC，返回 -1，菜单不关也不动；下一轮又读到那个 ESC……
+        # 菜单就再也关不掉了。冒烟测试每 50ms 灌一个 ESC，当场就挂住了。
+        try:
+            curses.ungetch(nxt)
+        except curses.error:
+            pass
+        return 27
+    finally:
+        win.timeout(-1)                     # 恢复阻塞读
+
+
 def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
     """Modal single-choice list. Returns the chosen index, or None."""
     if not options:
@@ -454,6 +524,7 @@ def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
     selected = 0
     while True:
         win = curses.newwin(box_h, box_w, top, left)
+        _enable_keys(win)
         paint_background(win)
         win.erase()
         panel(win, 0, 0, box_h, box_w, title)
@@ -467,7 +538,7 @@ def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
             safe_addstr(win, 2 + i, 2, pad(options[idx], box_w - 4), attr)
         safe_addstr(win, box_h - 1, 2, " ↑↓ 选择  Enter 确定  ESC 取消 ", color(CP_DIM))
         win.refresh()
-        key = win.getch()
+        key = _read_key(win)
         if key in (curses.KEY_UP, ord("k")):
             selected = (selected - 1) % len(options)
         elif key in (curses.KEY_DOWN, ord("j")):
@@ -496,6 +567,7 @@ def show_message(stdscr, title: str, body: str, is_error: bool = False) -> None:
     visible = box_h - 4
     while True:
         win = curses.newwin(box_h, box_w, top, left)
+        _enable_keys(win)
         paint_background(win)
         win.erase()
         draw_box(win, 0, 0, box_h, box_w, title, frame_attr,
@@ -512,7 +584,7 @@ def show_message(stdscr, title: str, body: str, is_error: bool = False) -> None:
                       "  ↑↓ 滚动  q 关闭 ")
         safe_addstr(win, box_h - 1, 2, footer, color(CP_DIM))
         win.refresh()
-        key = win.getch()
+        key = _read_key(win)
         if len(lines) > visible:
             if key in (curses.KEY_UP, ord("k")):
                 offset = max(0, offset - 1)
