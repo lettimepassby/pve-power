@@ -13,6 +13,8 @@ freeze the interface.
 from __future__ import annotations
 
 import datetime as dt
+import shutil
+import subprocess
 import threading
 from typing import Any, Optional
 
@@ -43,7 +45,13 @@ INTERVALS = {
     "users": 120,
     "lan": 120,
     "identity": 600,
+    # 日报状态：问一次 systemctl 加一次 meta 表，都是毫秒级，但在 5Hz 的
+    # 重绘路径上还是要缓存。人不会盯着定时器状态看，30 秒足够新。
+    "report_status": 30,
 }
+
+# systemd 单元名，日报页用它显示定时器是不是真的armed。
+REPORT_TIMER_UNIT = "pve-power-report.timer"
 
 
 class DataCache:
@@ -115,6 +123,11 @@ class DataCache:
     @property
     def fan_control(self):
         return self._values.get("fan_control")
+
+    @property
+    def report_status(self) -> dict:
+        """日报的运行状态。还没取到时返回空 dict，视图按「未知」显示。"""
+        return self._values.get("report_status") or {}
 
     @property
     def sel_entries(self):
@@ -230,6 +243,12 @@ class DataCache:
                 return self.ipmi.probe_fan_control()
             except IpmiError:
                 return None
+        if kind == "report_status":
+            status = _systemd_timer_status(REPORT_TIMER_UNIT)
+            # 上次发成功的日期由 mail-report 写进 meta；界面显示它，
+            # 这样「今天到底发没发」不用去翻 journal。
+            status["last_sent"] = self.storage.get_meta("last_report_sent")
+            return status
         if kind == "sel":
             entries = self.ipmi.sel_entries(limit=300)
             try:
@@ -298,3 +317,32 @@ class DataCache:
             return None
         projected = self.month.cost / fraction
         return projected + self.config.tariff.monthly_service_fee
+
+
+def _systemd_timer_status(unit: str) -> dict:
+    """查一个 systemd timer 的状态。
+
+    拿不到就返回 {"available": False} —— 开发机上没有 systemctl，
+    容器里也可能没有，这不是错误，界面据此换一种说法而已。
+    """
+    if not shutil.which("systemctl"):
+        return {"available": False}
+    props = ("UnitFileState", "ActiveState", "NextElapseUSecRealtime",
+             "LastTriggerUSec", "LoadState")
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, *(f"--property={p}" for p in props)],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"available": False}
+    status: dict = {"available": True}
+    for line in out.splitlines():
+        key, _, value = line.partition("=")
+        if key:
+            status[key] = value.strip()
+    # LoadState=not-found 说明单元文件根本没装（比如只升级了程序目录
+    # 没跑安装脚本）。这和「装了但没启用」是两回事，要分开说。
+    status["installed"] = status.get("LoadState") not in (None, "", "not-found")
+    status["enabled"] = status.get("UnitFileState") == "enabled"
+    return status

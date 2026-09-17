@@ -54,7 +54,7 @@ pve-power config --init    写入默认配置；--preset flat|china-tou
 
 ### 界面
 
-用 `1`–`7` 或 Tab/Shift-Tab 切换标签页；`r` 刷新，`?` 查看按键说明，`q` 退出。
+用 `1`–`9` 或 Tab/Shift-Tab 切换标签页；`r` 刷新，`?` 查看按键说明，`q` 退出。
 方向键、PgUp/PgDn、Home/End 以及 `j`/`k`/`g`/`G` 在视图内移动。
 
 | 标签页 | 内容 | 按键 |
@@ -112,6 +112,27 @@ pve-power config --init    写入默认配置；--preset flat|china-tou
 本月累计和推算，外加当天的 BMC 事件和异常传感器。同时给出纯文本和 HTML
 两个版本 —— 纯文本不是降级品，它自己就是完整的，方便转发进只显示纯文本
 的地方。
+
+### 在界面里设置
+
+启动 `pve-power`，切到「9：日报」标签页。所有字段都在那里：收件人、发送
+范围、SMTP 服务器和账号密码。
+
+* `P` 挑服务商预设（QQ、163、Gmail、Outlook 等），主机名、端口、加密方式
+  一次填好，只剩账号和密码要自己输。
+* `v` 预览报告正文，不发信。
+* `t` 立刻试发一封 —— 改完设置马上就知道对不对。SMTP 最容易配错的是端口
+  和加密方式不匹配、把登录密码当成授权码、发件地址和账号不一致，而这些
+  如果只能靠「等明天早上八点半看有没有收到」来发现，调一次要一天。
+* `s` 保存到配置文件。
+
+密码在界面上永远只显示设没设，不显示原文。试发不会影响定时任务：它不写
+「今天已发送」标记，到点了照常发当天那封。
+
+右边的状态面板会告诉你定时器是不是真的开着 —— 配置里 `enabled` 为 true
+但没 `systemctl enable` 的话，什么也不会发生，这是最容易漏的一步。
+
+### 或者直接改配置文件
 
 先预览，确认内容对了再配发信：
 
@@ -198,6 +219,7 @@ pvepower/cli.py         子命令
 pvepower/report.py      日报的内容组装与 text/HTML 渲染
 pvepower/mailer.py      SMTP 投递
 pvepower/tui/           curses 界面：app、数据缓存、控件、各视图
+pvepower/tui/theme.py   配色：终端色号与 HTML 邮件共用一套设计色
 pvepower/textwidth.py   中日韩宽字符的终端列宽计算
 etc/                    systemd 单元文件
 tools/install.sh        安装脚本
@@ -211,8 +233,9 @@ tests/                  电量与电价计算测试，以及 pty 驱动的界面
 ## 测试
 
 ```bash
-python3 -m unittest tests.test_energy tests.test_sensors \
-                   tests.test_theme tests.test_report tests.test_tui
+python3 -m unittest tests.test_energy tests.test_sensors tests.test_theme \
+                   tests.test_energy_view tests.test_report \
+                   tests.test_report_view tests.test_tui
 ```
 
 `test_energy` 用人工手算的数值校验积分和计价 —— 100W 持续一小时是 0.1 kWh，

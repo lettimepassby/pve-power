@@ -21,6 +21,7 @@ from .views.fans import FansView
 from .views.overview import OverviewView
 from .views.sel import SelView
 from .views.sensors import SensorsView
+from .views.report import ReportView
 from .views.tariff import TariffView
 from .views.users import UsersView
 from .widgets import (
@@ -166,6 +167,7 @@ class App:
             UsersView(self),
             SelView(self),
             TariffView(self),
+            ReportView(self),
         ]
 
         last_draw = 0.0

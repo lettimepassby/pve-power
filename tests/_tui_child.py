@@ -35,6 +35,7 @@ KEYS = [
     ord("c"), ord("p"), ord("i"),       # BMC actions
     ord("n"), ord("v"), ord("e"),       # user actions / export
     ord("a"), ord("x"), ord("s"), ord("P"), ord("R"), ord("X"),
+    ord("t"), ord("v"),                 # 日报页：试发 / 预览
 ]
 
 
@@ -74,7 +75,7 @@ def main() -> int:
     # Fill the cache synchronously: a draw must never depend on a
     # background refresh having landed.
     for kind in ("power", "sensors", "chassis", "identity", "lan", "users",
-                 "sel", "fan_control"):
+                 "sel", "fan_control", "report_status"):
         value = app.data._fetch(kind)
         if value is not None:
             app.data._values[kind] = value
@@ -87,6 +88,7 @@ def main() -> int:
         from pvepower.tui.views.energy import EnergyView
         from pvepower.tui.views.fans import FansView
         from pvepower.tui.views.overview import OverviewView
+        from pvepower.tui.views.report import ReportView
         from pvepower.tui.views.sel import SelView
         from pvepower.tui.views.sensors import SensorsView
         from pvepower.tui.views.tariff import TariffView
@@ -99,6 +101,7 @@ def main() -> int:
         app.views = [
             OverviewView(app), EnergyView(app), SensorsView(app), FansView(app),
             BmcView(app), UsersView(app), SelView(app), TariffView(app),
+            ReportView(app),
         ]
         for idx, view in enumerate(app.views):
             app.active = idx

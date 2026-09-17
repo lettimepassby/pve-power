@@ -48,6 +48,16 @@ class EnergyView(View):
     def days(self) -> int:
         return self.RANGES[self.range_index]
 
+    def _series(self):
+        """按天列表，最新的在最前面。
+
+        storage.daily_series 给的是时间正序（CSV 导出要的就是那个顺序），
+        但这一页是当日志看的：默认 30 天范围下，正序意味着今天和昨天被压
+        在最底下，一台刚装上几天的机器打开这一页只能看到一屏 0.000。
+        新的在上面，光标落在第一行就是今天。
+        """
+        return list(reversed(self.data.daily_series(self.days)))
+
     def draw(self, win, height: int, width: int) -> None:
         if self.mode == "daily":
             self._draw_daily(win, height, width)
@@ -58,8 +68,8 @@ class EnergyView(View):
 
     def _draw_daily(self, win, height, width):
         cur = self.app.config.tariff.currency
-        series = self.data.daily_series(self.days)
-        header = f"按天用电量：最近 {self.days} 天"
+        series = self._series()
+        header = f"按天用电量：最近 {self.days} 天（新→旧）"
         panel(win, 0, 0, height - 6, width, header)
 
         cols = (
@@ -203,7 +213,7 @@ class EnergyView(View):
                 return True
             if key in (ord("h"), curses.KEY_ENTER, 10, 13):
                 # Drill into the selected day.
-                series = self.data.daily_series(self.days)
+                series = self._series()
                 if 0 <= self.cursor < len(series):
                     self.day = dt.date.fromisoformat(series[self.cursor].label)
                 self.mode = "hourly"
