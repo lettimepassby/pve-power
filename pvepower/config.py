@@ -129,11 +129,83 @@ class CollectorConfig:
 
 
 @dataclass
+class SmtpConfig:
+    """发信服务器。密码落在配置文件里，所以 Config.save() 强制 0600。
+
+    `security` 决定加密方式，也决定默认端口：
+
+      * starttls —— 587，先明文连接再升级（绝大多数服务商，包括
+        QQ 邮箱、163、Gmail、企业微信邮箱）
+      * ssl      —— 465，一上来就是 TLS（部分国内服务商只开这个口）
+      * none     —— 25，不加密。只有在本机 relay 或内网 MTA 上才合理，
+        配了它就等于把密码明文发出去，所以 validate() 会在同时设了
+        密码时报错。
+
+    密码也可以不写进配置文件，改用环境变量 PVE_POWER_SMTP_PASSWORD
+    （systemd 单元里用 EnvironmentFile= 指向一个 0600 的文件）。
+    环境变量优先。
+    """
+
+    host: str = ""
+    port: int = 0            # 0 = 按 security 取默认端口
+    user: str = ""
+    password: str = ""
+    security: str = "starttls"   # starttls | ssl | none
+    sender: str = ""         # 发件地址，留空则用 user
+    sender_name: str = "pve-power"
+    timeout: int = 30
+
+    def effective_port(self) -> int:
+        if self.port:
+            return self.port
+        return {"ssl": 465, "none": 25}.get(self.security, 587)
+
+    def effective_sender(self) -> str:
+        return self.sender or self.user
+
+    def effective_password(self) -> str:
+        """环境变量优先，这样密码可以不落在配置文件里。"""
+        return os.environ.get("PVE_POWER_SMTP_PASSWORD") or self.password
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.host and self.recipients_possible)
+
+    @property
+    def recipients_possible(self) -> bool:
+        # 发件人是 SMTP 层面的必需项；收件人在 ReportConfig 里。
+        return bool(self.effective_sender())
+
+
+@dataclass
+class ReportConfig:
+    """日报。
+
+    `enabled` 是给 systemd timer 和安装脚本看的开关；手动跑
+    `pve-power mail-report --force` 不受它限制。
+
+    同一天只发一封：发送成功后日期会记进数据库 meta 表，timer 重复触发
+    或手动多跑几次都不会重复打扰收件人（`--force` 可以绕过）。
+    """
+
+    enabled: bool = False
+    recipients: list[str] = field(default_factory=list)
+    # 报告覆盖哪一天：yesterday（昨天一整天）或 today（今天到此刻为止）。
+    # 默认昨天——日报通常在早上发，那时候「昨天」才是完整的一天。
+    covers: str = "yesterday"
+    subject_prefix: str = "[pve-power]"
+    include_hourly: bool = True
+    include_bmc: bool = True
+
+
+@dataclass
 class Config:
     db_path: str = DEFAULT_DB_PATH
     ipmi: IpmiConfig = field(default_factory=IpmiConfig)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
     tariff: TariffConfig = field(default_factory=TariffConfig)
+    smtp: SmtpConfig = field(default_factory=SmtpConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)
     # Where the legacy cron script wrote its CSVs; used by the importer.
     legacy_csv_dir: str = "/var/log/pve-power"
 
@@ -153,10 +225,16 @@ class Config:
         cfg.db_path = raw.get("db_path", cfg.db_path)
         cfg.legacy_csv_dir = raw.get("legacy_csv_dir", cfg.legacy_csv_dir)
 
-        for section, target in (("ipmi", cfg.ipmi), ("collector", cfg.collector)):
+        for section, target in (("ipmi", cfg.ipmi), ("collector", cfg.collector),
+                                ("smtp", cfg.smtp), ("report", cfg.report)):
             for key, value in (raw.get(section) or {}).items():
                 if hasattr(target, key):
                     setattr(target, key, value)
+        # 收件人允许写成逗号分隔的一行，手写配置时比 JSON 数组顺手。
+        if isinstance(cfg.report.recipients, str):
+            cfg.report.recipients = [
+                a.strip() for a in cfg.report.recipients.split(",") if a.strip()
+            ]
 
         traw = raw.get("tariff") or {}
         t = cfg.tariff
@@ -256,6 +334,40 @@ class Config:
                 )
         if self.tariff.flat_price < 0:
             problems.append("基础电价 tariff.flat_price 必须 >= 0")
+        problems.extend(self.validate_mail())
+        return problems
+
+    def validate_mail(self) -> list[str]:
+        """只在启用了日报时才较真——没开这个功能的人不该被它的配置拦住。"""
+        problems: list[str] = []
+        smtp, report = self.smtp, self.report
+        if smtp.security not in ("starttls", "ssl", "none"):
+            problems.append(
+                "smtp.security 必须是 'starttls'、'ssl' 或 'none'"
+            )
+        if smtp.security == "none" and smtp.effective_password():
+            # 25 口不加密，密码会以明文过网。真要用内网 relay 的话
+            # 那种 relay 通常也不需要认证。
+            problems.append(
+                "smtp.security 为 'none'（不加密）时不应设置密码，"
+                "否则密码会明文发送；请改用 'starttls' 或 'ssl'"
+            )
+        if not report.enabled:
+            return problems
+        if not smtp.host:
+            problems.append("启用了日报 report.enabled，但没有设置 smtp.host")
+        if not smtp.effective_sender():
+            problems.append(
+                "启用了日报 report.enabled，但没有发件地址"
+                "（设置 smtp.sender 或 smtp.user）"
+            )
+        if not report.recipients:
+            problems.append("启用了日报 report.enabled，但 report.recipients 是空的")
+        for address in report.recipients:
+            if "@" not in address.strip("<> "):
+                problems.append(f"收件地址「{address}」看起来不是邮箱")
+        if report.covers not in ("yesterday", "today"):
+            problems.append("report.covers 必须是 'yesterday' 或 'today'")
         return problems
 
 

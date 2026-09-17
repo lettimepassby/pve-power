@@ -46,6 +46,7 @@ pve-power report           用电汇总；--days N 或 --month YYYY-MM
 pve-power sample           取一次读数并存储
 pve-power collect          运行采样循环（systemd 跑的就是这个）
 pve-power import           导入旧的 cron CSV；--dir 指定目录
+pve-power mail-report      生成日报并通过 SMTP 发送
 pve-power config --init    写入默认配置；--preset flat|china-tou
 ```
 
@@ -105,6 +106,81 @@ pve-power config --init    写入默认配置；--preset flat|china-tou
 `pve-power config --init --preset china-tou` 会写入一份示例分时电价方案
 （尖峰/高峰/平段/低谷）。里面的价格只是示例，不是你当地电网的价格。
 
+## 用电日报
+
+每天早上发一封邮件，内容是前一天的用电量、电费、逐小时曲线、分时段拆分、
+本月累计和推算，外加当天的 BMC 事件和异常传感器。同时给出纯文本和 HTML
+两个版本 —— 纯文本不是降级品，它自己就是完整的，方便转发进只显示纯文本
+的地方。
+
+先预览，确认内容对了再配发信：
+
+```bash
+pve-power mail-report --dry-run            # 打到终端，不连服务器
+pve-power mail-report --dry-run --html     # 连 HTML 一起打出来
+pve-power mail-report --dry-run --date 2026-09-16
+```
+
+然后在 `/etc/pve-power/config.json` 里填两节：
+
+```json
+{
+  "smtp": {
+    "host": "smtp.qq.com",
+    "security": "ssl",
+    "user": "you@qq.com",
+    "password": "授权码，不是登录密码",
+    "sender": "you@qq.com",
+    "sender_name": "pve-power"
+  },
+  "report": {
+    "enabled": true,
+    "recipients": ["ops@example.com"],
+    "covers": "yesterday"
+  }
+}
+```
+
+`security` 有三个值，端口不填就按它取默认：
+
+| security   | 默认端口 | 用在哪 |
+|------------|---------|--------|
+| `starttls` | 587     | 绝大多数服务商（Gmail、企业邮箱、自建 Postfix） |
+| `ssl`      | 465     | QQ 邮箱、163 这些只开 465 的 |
+| `none`     | 25      | 内网 relay；配了它就不能再设密码，否则密码明文过网 |
+
+证书一律验证，没有关掉的开关：一个每天自动发信的任务如果对中间人毫无
+察觉，SMTP 密码就等于公开了。自签证书的内网 MTA 请把 CA 装进系统信任库。
+
+QQ 邮箱和 163 要的是**授权码**，在邮箱设置里单独生成，不是你的登录密码。
+
+不想让密码落在配置文件里的话，改放 `/etc/pve-power/smtp.env`（权限 0600）：
+
+```
+PVE_POWER_SMTP_PASSWORD=授权码
+```
+
+systemd 单元已经带了 `EnvironmentFile=-`，环境变量优先于配置文件。
+
+配好以后发一封真的试试，再交给定时器：
+
+```bash
+pve-power mail-report --force          # --force 绕过「今天已发过」
+systemctl enable --now pve-power-report.timer
+systemctl list-timers pve-power-report.timer
+```
+
+默认每天 8:30 发前一天的完整日报（带最多 5 分钟随机延迟，避开整点的
+限流高峰）。改时间就改 `etc/pve-power-report.timer` 里的 `OnCalendar`。
+如果改成夜里发「今天」的，记得把 `report.covers` 也改成 `"today"`，
+否则发出去的还是昨天那份。
+
+机器在 8:30 时关着也不会漏：定时器带 `Persistent=true`，开机后会补发。
+同一天只发一封 —— 发送成功的日期记在数据库里，重复触发会跳过。
+
+退出码：`0` 成功或按规则跳过，`1` 发送失败，`2` 配置不全。定时器单元对
+`2` 不重试，配置不会自己长好，重试只会每五分钟往 journal 里灌同样的报错。
+
 ## 远程 BMC
 
 `ipmi.host` 留空时使用本地 KCS 接口（`/dev/ipmi0`），在 PVE 主机上跑就应该
@@ -119,6 +195,8 @@ pvepower/storage.py     SQLite 表结构、积分、聚合、重算
 pvepower/config.py      配置模型、电价计算、校验
 pvepower/collector.py   采样守护进程和旧 CSV 导入
 pvepower/cli.py         子命令
+pvepower/report.py      日报的内容组装与 text/HTML 渲染
+pvepower/mailer.py      SMTP 投递
 pvepower/tui/           curses 界面：app、数据缓存、控件、各视图
 pvepower/textwidth.py   中日韩宽字符的终端列宽计算
 etc/                    systemd 单元文件
@@ -133,13 +211,20 @@ tests/                  电量与电价计算测试，以及 pty 驱动的界面
 ## 测试
 
 ```bash
-python3 -m unittest tests.test_energy tests.test_tui
+python3 -m unittest tests.test_energy tests.test_sensors \
+                   tests.test_theme tests.test_report tests.test_tui
 ```
 
 `test_energy` 用人工手算的数值校验积分和计价 —— 100W 持续一小时是 0.1 kWh，
 一小时内从 100W 线性升到 200W 是 0.15 kWh，谷时按 0.20 计费的 1 度电在峰时
 采样加入后仍然是 0.20。`test_tui` 在真实 pty 里以六种终端尺寸渲染每一个视图
 （包括一种小于最小尺寸的），并按下所有按键，包括会弹出对话框的那些。
+
+`test_report` 里发信那部分不打桩 `smtplib`，而是在本地起一个真的 SMTP
+服务器让它连上去。打桩只能证明「我调用了 sendmail」，证明不了信封地址、
+多部分结构和中文编码对不对 —— 而这正是发信真正会出错的地方。这条测试
+当场就抓到一个：`EmailMessage` 默认 policy 的 `cte_type` 是 `8bit`，中文
+正文会以裸 UTF-8 字节发出去，只有宣告了 `8BITMIME` 的服务器才允许这样。
 
 ## 没有做的事
 

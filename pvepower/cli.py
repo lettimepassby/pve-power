@@ -6,6 +6,7 @@
   sample    取一次读数，用于测试
   import    把旧的 cron CSV 导入数据库
   report    打印用电汇总
+  mail-report  生成日报并通过 SMTP 发送
   status    一次性健康检查，适合脚本调用
   config    查看或初始化配置
 """
@@ -185,6 +186,100 @@ def cmd_status(args) -> int:
     return 0 if out.get("collector") == "ok" and out.get("bmc") == "ok" else 1
 
 
+MAIL_SENT_KEY = "last_report_sent"
+
+
+def cmd_mail_report(args) -> int:
+    """生成日报并通过 SMTP 发出去。
+
+    退出码：0 成功或按规则跳过，1 发送失败，2 配置不全。
+    systemd 的 timer 单元靠它区分「今天没什么可做」和「真的出问题了」。
+    """
+    from . import mailer, report as report_mod
+
+    config = _load(args)
+
+    if args.date:
+        day = _parse_day(args.date)
+    else:
+        day = report_mod.resolve_day(config.report.covers)
+
+    ipmi = None
+    if config.report.include_bmc and not args.no_bmc:
+        ipmi = IpmiTool(
+            binary=config.ipmi.binary,
+            host=config.ipmi.host,
+            user=config.ipmi.user,
+            password=config.ipmi.password,
+            interface=config.ipmi.interface,
+            timeout=config.ipmi.timeout,
+        )
+
+    with Storage(config.db_path) as storage:
+        # 同一天只发一封。timer 可能因为 Persistent=true 在开机后补触发，
+        # 手动跑一次之后 timer 又到点了也是常事 —— 不加这道闸，收件人
+        # 一天会收到好几封一模一样的信。
+        already = storage.get_meta(MAIL_SENT_KEY)
+        if already == day.isoformat() and not args.force and not args.dry_run:
+            print(f"{day} 的日报已经发过了（--force 可以再发一次）。")
+            return 0
+
+        rep = report_mod.build(config, storage, day=day, ipmi=ipmi)
+        text = report_mod.render_text(rep)
+
+        if args.dry_run:
+            print(text)
+            if args.html:
+                print("\n" + "=" * 52 + "\nHTML:\n")
+                print(report_mod.render_html(rep))
+            return 0
+
+        problems = config.validate_mail()
+        if not config.report.recipients:
+            problems.append("没有收件人：请设置 report.recipients")
+        if not config.smtp.host:
+            problems.append("没有发信服务器：请设置 smtp.host")
+        if problems:
+            print("邮件配置不完整：", file=sys.stderr)
+            for problem in dict.fromkeys(problems):
+                print(f"  - {problem}", file=sys.stderr)
+            return 2
+
+        recipients = args.to or config.report.recipients
+        message = mailer.build_message(
+            config.smtp, recipients,
+            subject=rep.subject(config.report.subject_prefix),
+            text=text,
+            html=report_mod.render_html(rep),
+        )
+        try:
+            mailer.send(config.smtp, message, recipients)
+        except mailer.MailError as exc:
+            print(f"日报发送失败：{exc}", file=sys.stderr)
+            storage.log_event("report_failed", str(exc))
+            return 1
+
+        storage.set_meta(MAIL_SENT_KEY, day.isoformat())
+        storage.log_event("report_sent", f"{day} -> {', '.join(recipients)}")
+        print(f"{day} 的日报已发送给 {', '.join(recipients)}。")
+    return 0
+
+
+def _parse_day(value: str) -> dt.date:
+    value = value.strip().lower()
+    today = dt.date.today()
+    if value == "today":
+        return today
+    if value == "yesterday":
+        return today - dt.timedelta(days=1)
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise SystemExit(
+            f"无法解析日期「{value}」，请用 YYYY-MM-DD、today 或 yesterday"
+        )
+
+
 def cmd_config(args) -> int:
     if args.init:
         config = Config()
@@ -241,6 +336,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="一次性健康检查")
     p_status.add_argument("--json", action="store_true", help="以 JSON 输出")
     p_status.set_defaults(func=cmd_status)
+
+    p_mail = sub.add_parser("mail-report", help="生成日报并通过 SMTP 发送")
+    p_mail.add_argument(
+        "--date", help="报告哪一天：YYYY-MM-DD、today 或 yesterday"
+                       "（默认按 report.covers）",
+    )
+    p_mail.add_argument(
+        "--to", action="append",
+        help="收件地址，覆盖 report.recipients；可以重复使用",
+    )
+    p_mail.add_argument(
+        "--dry-run", action="store_true",
+        help="只把报告打到终端，不连服务器也不记录已发送",
+    )
+    p_mail.add_argument(
+        "--html", action="store_true", help="配合 --dry-run 一并打印 HTML",
+    )
+    p_mail.add_argument(
+        "--force", action="store_true",
+        help="即使今天已经发过也再发一次",
+    )
+    p_mail.add_argument(
+        "--no-bmc", action="store_true",
+        help="跳过硬件部分，不去问 BMC",
+    )
+    p_mail.set_defaults(func=cmd_mail_report)
 
     p_config = sub.add_parser("config", help="查看或创建配置")
     p_config.add_argument("--init", action="store_true", help="写入默认配置文件")

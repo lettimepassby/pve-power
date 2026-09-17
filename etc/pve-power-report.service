@@ -1,0 +1,48 @@
+[Unit]
+Description=pve-power 用电日报
+Documentation=file:/opt/pve-power/README.md
+After=network-online.target
+Wants=network-online.target
+
+# 配合 [Service] 里的 Restart=on-failure：最多重试两次就罢手，
+# 免得一个配错的 SMTP 账号每五分钟往 journal 里刷一次。
+StartLimitBurst=3
+StartLimitIntervalSec=1800
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -m pvepower --config /etc/pve-power/config.json mail-report
+WorkingDirectory=/opt/pve-power
+Environment=PYTHONPATH=/opt/pve-power
+Environment=PYTHONUNBUFFERED=1
+
+# SMTP 密码可以不写进 config.json，改放这里（文件权限 0600，内容是
+# PVE_POWER_SMTP_PASSWORD=xxxx）。前面的 '-' 表示文件不存在也不算错，
+# 没用这种方式的人不受影响。
+EnvironmentFile=-/etc/pve-power/smtp.env
+
+# 发信失败就重试两次。日报一天只有这一次机会，而 SMTP 超时、DNS 暂时
+# 解析不了这类抖动很常见。mail-report 内部已经重试过三次，这里是更外
+# 一层的兜底，间隔拉长到 5 分钟，覆盖网络刚起来还没通的情况。
+#
+# 注意退出码 2（配置不全）不该重试 —— 配置不会自己长好，反复重试只会
+# 每五分钟往日志里灌一次同样的报错。
+Restart=on-failure
+RestartSec=300
+RestartPreventExitStatus=2
+
+# 它要读数据库、问 BMC、连外网发信，除此以外什么都不需要。
+StateDirectory=pve-power
+ConfigurationDirectory=pve-power
+DeviceAllow=/dev/ipmi0 rw
+DeviceAllow=/dev/ipmidev/0 rw
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pve-power
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryMax=128M

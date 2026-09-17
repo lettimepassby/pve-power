@@ -12,6 +12,8 @@ CONFIG="$CONFIG_DIR/config.json"
 STATE_DIR="${STATE_DIR:-/var/lib/pve-power}"
 BIN="/usr/local/bin/pve-power"
 UNIT="/etc/systemd/system/pve-power-collector.service"
+REPORT_UNIT="/etc/systemd/system/pve-power-report.service"
+REPORT_TIMER="/etc/systemd/system/pve-power-report.timer"
 LEGACY_CRON_SCRIPT="/usr/local/bin/pve-power-log.sh"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -101,6 +103,33 @@ else
     echo "      journalctl -u pve-power-collector -n 50" >&2
 fi
 
+# --- daily report -----------------------------------------------------
+# 单元文件总是装上，但定时器只在配置里真的开了日报时才启用 ——
+# 没配 SMTP 的人不该每天收到一封发送失败的告警。
+note "日报单元   -> $REPORT_TIMER"
+install -m 0644 "$SRC/etc/pve-power-report.service" "$REPORT_UNIT"
+install -m 0644 "$SRC/etc/pve-power-report.timer" "$REPORT_TIMER"
+systemctl daemon-reload
+
+REPORT_ENABLED="$(PYTHONPATH="$PREFIX" python3 - "$CONFIG" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print("1" if (json.load(fh).get("report") or {}).get("enabled") else "0")
+except Exception:
+    print("0")
+PYEOF
+)"
+
+if [ "$REPORT_ENABLED" = "1" ]; then
+    systemctl enable --now pve-power-report.timer >/dev/null 2>&1 ||         systemctl enable pve-power-report.timer
+    note "日报定时器已启用（$(systemctl show -p TriggersNext --value \
+        pve-power-report.timer 2>/dev/null || echo '见 systemctl list-timers')）"
+else
+    systemctl disable --now pve-power-report.timer >/dev/null 2>&1 || true
+    note "日报未启用（配置里 report.enabled 为 false）"
+fi
+
 cat <<EOF
 
 安装完成。
@@ -108,12 +137,20 @@ cat <<EOF
   pve-power              启动界面
   pve-power status       一次性健康检查
   pve-power report       用电汇总
+  pve-power mail-report --dry-run   预览日报（不发信）
 
 在看电费数字之前，请先把电价设对：启动 'pve-power'，进入
 "电价"标签页，把费率改成你账单上的数字。
 默认值 0.60 元/kWh 只是占位。
 
+想每天收一封用电日报，先把 SMTP 填进 $CONFIG 的
+"smtp" 和 "report" 两节（README 里有 QQ / 163 的示例），
+再跑一次本脚本，或者直接：
+
+  systemctl enable --now pve-power-report.timer
+
 配置文件：$CONFIG
 数据库：  $STATE_DIR/power.db
 服务：    systemctl status pve-power-collector
+日报：    systemctl list-timers pve-power-report.timer
 EOF

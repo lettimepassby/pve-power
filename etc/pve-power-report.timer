@@ -1,0 +1,21 @@
+[Unit]
+Description=每天发送 pve-power 用电日报
+Documentation=file:/opt/pve-power/README.md
+
+[Timer]
+# 早上 8:30 发前一天的完整日报。改时间就改这里，然后
+# systemctl daemon-reload && systemctl restart pve-power-report.timer
+#
+# 如果改成夜里 23:5x 发「今天」的，记得把 config.json 里的
+# report.covers 也改成 "today"，否则发出去的还是昨天那份。
+OnCalendar=*-*-* 08:30:00
+
+# 错开整点。全世界的定时任务都压在 :00，邮件服务商那一刻的限流最凶。
+RandomizedDelaySec=300
+
+# 机器在 8:30 时是关着的（或者在休眠）就在下次开机后补发。
+# 不怕重复：mail-report 会把已发送的日期记在数据库里，同一天只发一封。
+Persistent=true
+
+[Install]
+WantedBy=timers.target
