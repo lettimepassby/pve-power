@@ -14,8 +14,6 @@ from ..widgets import (
     CP_TITLE,
     CP_WARN,
     CP_CRIT_BAR,
-    CP_WARN_BAR,
-    CP_OK_BAR,
     color,
     draw_bar,
     cwidth,
@@ -143,12 +141,14 @@ class FansView(View):
 
                 percent = fan.percent_of(reference) or 0.0
                 bar_width = max(8, width - x - 10)
-                if percent >= 85:
-                    bar_attr = color(CP_CRIT_BAR)
-                elif percent >= 60:
-                    bar_attr = color(CP_WARN_BAR)
-                else:
-                    bar_attr = color(CP_OK_BAR)
+                # 这一列是转速量级，不是健康度——健康度左边的状态列已经
+                # 说了。reference 取的是同机最快的那把风扇，所以一台好机器
+                # 上每把风扇本来就落在 85-100%；按百分比染红，等于让「状态：
+                # 正常」的旁边全是红条，红色也就不再有意义了。
+                # 所以正常风扇一律用中性的数据色（跟总览的负载条同一档），
+                # 只有 BMC 真的报故障时才红。
+                bar_attr = (color(CP_ACCENT) if fan.ok
+                            else color(CP_CRIT_BAR))
                 if selected:
                     safe_addstr(win, y, x,
                                 pad(hbar(percent, 100.0, bar_width), bar_width),

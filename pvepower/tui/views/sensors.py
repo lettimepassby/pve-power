@@ -117,23 +117,24 @@ class SensorsView(View):
             # Headroom to critical, as a bar: the quickest way to spot a
             # sensor that is technically 'ok' but running out of margin.
             headroom = s.headroom()
-            if headroom is not None and s.upper_crit:
+            fraction = s.bar_fraction()
+            if headroom is not None and fraction is not None:
                 bar_width = max(6, width - x - 14)
-                used = s.value / s.upper_crit if s.upper_crit else 0
+                # 颜色跟着 BMC 给的阈值走，不按「占上限多少比例」推算——
+                # 后者会把标称 12V 的电压轨（上限临界 14.3V，读数正好在
+                # 量程 83% 处）画成告警，而它其实是最健康的值。
                 # 条形用「图形档」的色（3:1），比文字档鲜一点；选中行整行
                 # 反白，这时候不画轨道，否则轨道的灰会在反白底上开个洞。
-                if used >= 0.95:
-                    bar_attr = color(CP_CRIT_BAR)
-                elif used >= 0.85:
-                    bar_attr = color(CP_WARN_BAR)
-                else:
-                    bar_attr = color(CP_OK_BAR)
+                bar_attr = {
+                    "crit": color(CP_CRIT_BAR),
+                    "warn": color(CP_WARN_BAR),
+                }.get(s.severity(), color(CP_OK_BAR))
                 if selected:
                     safe_addstr(win, y, x,
-                                pad(hbar(s.value, s.upper_crit, bar_width),
+                                pad(hbar(fraction, 1.0, bar_width),
                                     bar_width), base)
                 else:
-                    draw_bar(win, y, x, s.value, s.upper_crit, bar_width, bar_attr)
+                    draw_bar(win, y, x, fraction, 1.0, bar_width, bar_attr)
                 safe_addstr(win, y, x + bar_width + 1, rpad(f"{headroom:+.0f}", 4),
                             base if selected else color(CP_DIM))
 

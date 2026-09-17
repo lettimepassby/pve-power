@@ -71,6 +71,45 @@ class Sensor:
             return None
         return self.upper_crit - self.value
 
+    def severity(self) -> str:
+        """"ok" / "warn" / "crit"，按 BMC 自己给的阈值判定。
+
+        不要用「读数是上限临界值的百分之多少」来推严重度：那对温度勉强
+        成立（越高越危险），对电压完全不成立。这台机器的 SYS_12V 标称
+        12V、上限临界 14.288V，正常读数 11.844V 就已经是上限的 83%，
+        按比例判会被画成告警——可它恰恰是最健康的值。电压是在量程中间
+        有个标称点，两头才是危险。
+
+        BMC 的 nc（non-critical）和 crit 阈值本来就把这件事说清楚了，
+        而且上下两侧都给了，直接用。
+        """
+        if self.value is None:
+            return "ok"
+        v = self.value
+        if ((self.upper_crit is not None and v >= self.upper_crit)
+                or (self.lower_crit is not None and v <= self.lower_crit)):
+            return "crit"
+        if ((self.upper_nc is not None and v >= self.upper_nc)
+                or (self.lower_nc is not None and v <= self.lower_nc)):
+            return "warn"
+        return "ok"
+
+    def bar_fraction(self) -> Optional[float]:
+        """读数在量程里的位置，0-1，用来画条形。
+
+        有下限阈值的传感器（电压这类）按 [lower_crit, upper_crit] 的跨度
+        取位置，所以标称值落在中间；只有上限的（温度这类）还是按
+        value/upper_crit，条形长度就是「离过热还有多远」。
+        """
+        if self.value is None or self.upper_crit is None:
+            return None
+        if self.lower_crit is not None and self.upper_crit > self.lower_crit:
+            span = self.upper_crit - self.lower_crit
+            return max(0.0, min(1.0, (self.value - self.lower_crit) / span))
+        if self.upper_crit <= 0:
+            return None
+        return max(0.0, min(1.0, self.value / self.upper_crit))
+
 
 @dataclass
 class FanReading:
