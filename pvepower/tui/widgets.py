@@ -20,6 +20,7 @@ from typing import Optional, Sequence
 from ..textwidth import clip, cwidth
 from ..textwidth import lpad as _lpad
 from ..textwidth import rpad as _rpad
+from .theme import active_palette
 
 # Colour pair ids.
 CP_NORMAL = 1
@@ -31,21 +32,76 @@ CP_DIM = 6
 CP_HIGHLIGHT = 7
 CP_ACCENT = 8
 CP_HEADER = 9
+# 亮色主题新增的角色。前九个是既有视图在用的，不动。
+CP_BORDER = 10      # 面板边框：比标题淡，不跟数据抢注意力
+CP_SURFACE = 11     # 表头色带，对应设计系统里的 Muted
+CP_TRACK = 12       # 进度条没填满的那一截
+CP_OK_BAR = 13      # 下面四个是「图形档」：条形图、迷你折线这类
+CP_WARN_BAR = 14    # 非文字元素，按 3:1 收，颜色比文字档鲜一些
+CP_CRIT_BAR = 15
+CP_ACCENT_BAR = 16
 
 # Eighth-block glyphs for bar charts and sparklines.
 BLOCKS = " ▁▂▃▄▅▆▇█"
 
+# 主题是否真的生效了。8 色终端拿不到亮色底（见 init_colors），
+# 视图靠这个决定要不要画色带之类只在亮色下好看的装饰。
+THEMED = False
+
 
 def init_colors() -> bool:
-    """Set up colour pairs. Returns False on a monochrome terminal."""
+    """建立颜色对。单色终端返回 False。
+
+    只有 256 色终端才上亮色主题。8 色终端（PVE 物理控制台就是）做不到：
+    那套调色板里的绿、黄、青在白底上只有 2.3-2.8:1，远低于 4.5:1，硬套
+    亮色只会换来一屏看不清的字。所以那边继续沿用终端自己的背景色和经典
+    八色 —— 在默认的深色控制台上它本来就是清楚的。
+    """
     if not curses.has_colors():
         return False
     curses.start_color()
     try:
         curses.use_default_colors()
-        bg = -1
+        default_bg = -1
     except curses.error:
-        bg = curses.COLOR_BLACK
+        default_bg = curses.COLOR_BLACK
+
+    global THEMED
+    THEMED = curses.COLORS >= 256
+    if not THEMED:
+        return _init_basic_colors(default_bg)
+
+    p = active_palette()
+    bg, fg = p["bg"], p["fg"]
+    pairs = {
+        CP_NORMAL: (fg, bg),
+        CP_TITLE: (p["primary"], bg),
+        CP_OK: (p["ok"], bg),
+        CP_WARN: (p["warn"], bg),
+        CP_CRIT: (p["crit"], bg),
+        CP_DIM: (p["dim"], bg),
+        CP_HIGHLIGHT: (p["sel_fg"], p["sel_bg"]),
+        CP_ACCENT: (p["data"], bg),
+        CP_HEADER: (p["primary_fg"], p["primary"]),
+        CP_BORDER: (p["border"], bg),
+        CP_SURFACE: (fg, p["surface"]),
+        CP_TRACK: (p["track"], bg),
+        CP_OK_BAR: (p["ok_bar"], bg),
+        CP_WARN_BAR: (p["warn_bar"], bg),
+        CP_CRIT_BAR: (p["crit_bar"], bg),
+        CP_ACCENT_BAR: (p["warn_bar"], bg),
+    }
+    for pair, (f, b) in pairs.items():
+        try:
+            curses.init_pair(pair, f, b)
+        except curses.error:
+            THEMED = False
+            return _init_basic_colors(default_bg)
+    return True
+
+
+def _init_basic_colors(bg: int) -> bool:
+    """8/16 色回退：沿用终端自己的背景，经典配色。"""
     curses.init_pair(CP_NORMAL, curses.COLOR_WHITE, bg)
     curses.init_pair(CP_TITLE, curses.COLOR_CYAN, bg)
     curses.init_pair(CP_OK, curses.COLOR_GREEN, bg)
@@ -55,7 +111,29 @@ def init_colors() -> bool:
     curses.init_pair(CP_HIGHLIGHT, curses.COLOR_BLACK, curses.COLOR_CYAN)
     curses.init_pair(CP_ACCENT, curses.COLOR_MAGENTA, bg)
     curses.init_pair(CP_HEADER, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(CP_BORDER, curses.COLOR_BLUE, bg)
+    curses.init_pair(CP_SURFACE, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(CP_TRACK, curses.COLOR_BLUE, bg)
+    curses.init_pair(CP_OK_BAR, curses.COLOR_GREEN, bg)
+    curses.init_pair(CP_WARN_BAR, curses.COLOR_YELLOW, bg)
+    curses.init_pair(CP_CRIT_BAR, curses.COLOR_RED, bg)
+    curses.init_pair(CP_ACCENT_BAR, curses.COLOR_MAGENTA, bg)
     return True
+
+
+def paint_background(win) -> None:
+    """把窗口底色刷成主题背景。
+
+    curses 的 erase() 用的是窗口的 bkgd 字符，默认底色是终端自己的。
+    亮色主题下不设这个，面板之间的空白会露出终端的深色底，整屏变成
+    补丁。弹窗每次是新建的 window，所以也得各自刷一次。
+    """
+    if not THEMED:
+        return
+    try:
+        win.bkgd(" ", curses.color_pair(CP_NORMAL))
+    except curses.error:
+        pass
 
 
 def color(pair: int, bold: bool = False) -> int:
@@ -144,6 +222,22 @@ def hbar(value: float, maximum: float, width: int, fill: str = "█") -> str:
     return bar.ljust(width)
 
 
+def draw_bar(win, y: int, x: int, value: float, maximum: float, width: int,
+             attr: int) -> None:
+    """画一条带轨道的进度条。
+
+    只画填充部分的话，条形短的时候读者看不出量程有多长 —— 「20%」和
+    「一小截」之间要靠猜。轨道用淡灰把剩余部分补出来，形状就成了量表。
+    """
+    if width <= 0:
+        return
+    bar = hbar(value, maximum, width)
+    filled = len(bar.rstrip(" "))
+    safe_addstr(win, y, x, bar[:filled], attr)
+    if filled < width:
+        safe_addstr(win, y, x + filled, "─" * (width - filled), color(CP_TRACK))
+
+
 def draw_box(win, y: int, x: int, height: int, width: int, title: str = "",
              attr: int = 0, title_attr: Optional[int] = None) -> None:
     """Draw a single-line box. Clipped to the window; never raises."""
@@ -152,14 +246,48 @@ def draw_box(win, y: int, x: int, height: int, width: int, title: str = "",
     width = min(width, max_x - x)
     if height < 2 or width < 2:
         return
-    safe_addstr(win, y, x, "┌" + "─" * (width - 2) + "┐", attr)
+    safe_addstr(win, y, x, "╭" + "─" * (width - 2) + "╮", attr)
     for row in range(1, height - 1):
         safe_addstr(win, y + row, x, "│", attr)
         safe_addstr(win, y + row, x + width - 1, "│", attr)
-    safe_addstr(win, y + height - 1, x, "└" + "─" * (width - 2) + "┘", attr)
+    safe_addstr(win, y + height - 1, x, "╰" + "─" * (width - 2) + "╯", attr)
     if title:
         label = truncate(f" {title} ", width - 4)
         safe_addstr(win, y, x + 2, label, title_attr if title_attr is not None else attr)
+
+
+def panel(win, y: int, x: int, height: int, width: int, title: str = "") -> None:
+    """标准面板：淡边框 + 主色标题。
+
+    视图原来每处都手写 `draw_box(..., color(CP_TITLE), color(CP_TITLE, True))`，
+    边框和标题同色同亮度，一屏八个框全在抢眼。这里把边框降到 CP_BORDER，
+    只让标题留在主色上，层次就出来了。
+    """
+    draw_box(win, y, x, height, width, title,
+             color(CP_BORDER), color(CP_TITLE, bold=True))
+
+
+def table_header(win, y: int, x: int, text: str, width: int) -> None:
+    """表头：亮色下铺一条 Muted 色带，暗色 / 8 色下退回加粗。"""
+    attr = color(CP_SURFACE, bold=True) if THEMED else color(CP_DIM, bold=True)
+    safe_addstr(win, y, x, pad(text, width), attr)
+
+
+def highlight_row(win, y: int, x: int, width: int) -> None:
+    """把选中行整行铺成高亮底。
+
+    行内各列是分段写的，段与段之间、以及行尾剩下的空白都保持背景色 ——
+    只给文字上高亮的话，选中行看起来是一串断续的色块而不是一整条。
+    先铺底再写字，光标落在哪一行就一目了然。
+    """
+    safe_addstr(win, y, x, " " * max(0, width), color(CP_HIGHLIGHT))
+
+
+def row_attr(selected: bool, base: Optional[int] = None) -> int:
+    """列表行的属性：选中行整行反白，否则用给定的语义色。"""
+    if selected:
+        return color(CP_HIGHLIGHT, bold=True)
+    return base if base is not None else color(CP_NORMAL)
 
 
 def status_attr(status: str) -> int:
@@ -326,16 +454,16 @@ def choose(stdscr, title: str, options: Sequence[str]) -> Optional[int]:
     selected = 0
     while True:
         win = curses.newwin(box_h, box_w, top, left)
+        paint_background(win)
         win.erase()
-        draw_box(win, 0, 0, box_h, box_w, title,
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, box_h, box_w, title)
         visible = box_h - 4
         start = max(0, min(selected - visible // 2, len(options) - visible))
         for i in range(min(visible, len(options))):
             idx = start + i
             if idx >= len(options):
                 break
-            attr = color(CP_HIGHLIGHT) if idx == selected else color(CP_NORMAL)
+            attr = row_attr(idx == selected)
             safe_addstr(win, 2 + i, 2, pad(options[idx], box_w - 4), attr)
         safe_addstr(win, box_h - 1, 2, " ↑↓ 选择  Enter 确定  ESC 取消 ", color(CP_DIM))
         win.refresh()
@@ -364,10 +492,11 @@ def show_message(stdscr, title: str, body: str, is_error: bool = False) -> None:
     top = max(0, (height - box_h) // 2)
     left = max(0, (width - box_w) // 2)
     offset = 0
-    frame_attr = color(CP_CRIT if is_error else CP_TITLE)
+    frame_attr = color(CP_CRIT if is_error else CP_BORDER)
     visible = box_h - 4
     while True:
         win = curses.newwin(box_h, box_w, top, left)
+        paint_background(win)
         win.erase()
         draw_box(win, 0, 0, box_h, box_w, title, frame_attr,
                  color(CP_CRIT if is_error else CP_TITLE, bold=True))

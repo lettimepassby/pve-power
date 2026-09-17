@@ -7,6 +7,7 @@ import curses
 from ...ipmi import IpmiError
 from ..widgets import (
     CP_ACCENT,
+    CP_BORDER,
     CP_CRIT,
     CP_DIM,
     CP_HIGHLIGHT,
@@ -17,8 +18,11 @@ from ..widgets import (
     color,
     confirm,
     draw_box,
+    highlight_row,
     pad,
+    panel,
     safe_addstr,
+    table_header,
     severity_attr,
     show_message,
     truncate,
@@ -46,13 +50,11 @@ class SelView(View):
         title = "BMC 系统事件日志"
         if self.problems_only:
             title += " —— 只看告警和故障"
-        draw_box(win, 0, 0, height - 4, width, title,
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
-        safe_addstr(
+        panel(win, 0, 0, height - 4, width, title)
+        table_header(
             win, 1, 2,
-            pad(pad("编号", 6) + pad("时间", 26) + pad("传感器", 26) + "事件",
-                width - 4),
-            color(CP_DIM, bold=True),
+            pad("编号", 6) + pad("时间", 26) + pad("传感器", 26) + "事件",
+            width - 4,
         )
 
         visible = height - 7
@@ -67,6 +69,8 @@ class SelView(View):
             entry = entries[idx]
             y = 2 + i
             selected = idx == self.cursor
+            if selected:
+                highlight_row(win, y, 1, width - 2)
             attr = (
                 color(CP_HIGHLIGHT) if selected else severity_attr(entry.severity)
             )
@@ -83,7 +87,7 @@ class SelView(View):
 
         # ---- summary ----
         y = height - 4
-        draw_box(win, y, 0, 4, width, "", color(CP_DIM))
+        draw_box(win, y, 0, 4, width, "", color(CP_BORDER))
         all_entries = self.data.sel_entries or []
         crit = sum(1 for e in all_entries if e.severity == "critical")
         warn = sum(1 for e in all_entries if e.severity == "warning")

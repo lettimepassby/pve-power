@@ -6,6 +6,7 @@ import curses
 
 from ..widgets import (
     CP_ACCENT,
+    CP_BORDER,
     CP_CRIT,
     CP_DIM,
     CP_HIGHLIGHT,
@@ -13,13 +14,20 @@ from ..widgets import (
     CP_OK,
     CP_TITLE,
     CP_WARN,
+    CP_CRIT_BAR,
+    CP_WARN_BAR,
+    CP_OK_BAR,
     color,
+    draw_bar,
     cwidth,
     draw_box,
     hbar,
+    highlight_row,
     pad,
+    panel,
     rpad,
     safe_addstr,
+    table_header,
     status_attr,
     truncate,
 )
@@ -64,14 +72,12 @@ class SensorsView(View):
         title = f"传感器（筛选：{KIND_LABELS[KINDS[self.kind_index]]}）"
         if self.faults_only:
             title = title[:-1] + "，只看故障）"
-        draw_box(win, 0, 0, height - 3, width, title,
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
-        safe_addstr(
+        panel(win, 0, 0, height - 3, width, title)
+        table_header(
             win, 1, 2,
-            pad(pad("传感器名称", 20) + rpad("读数", 12) + " "
-                + pad("单位", 11) + pad("状态", 6) + rpad("阈值", 9) + "  余量",
-                width - 4),
-            color(CP_DIM, bold=True),
+            pad("传感器名称", 20) + rpad("读数", 12) + " "
+            + pad("单位", 11) + pad("状态", 6) + rpad("阈值", 9) + "  余量",
+            width - 4,
         )
 
         visible = height - 6
@@ -86,6 +92,8 @@ class SensorsView(View):
             s = sensors[idx]
             y = 2 + i
             selected = idx == self.cursor
+            if selected:
+                highlight_row(win, y, 1, width - 2)
             base = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
 
             value = f"{s.value:.2f}" if s.value is not None else "—"
@@ -112,20 +120,26 @@ class SensorsView(View):
             if headroom is not None and s.upper_crit:
                 bar_width = max(6, width - x - 14)
                 used = s.value / s.upper_crit if s.upper_crit else 0
+                # 条形用「图形档」的色（3:1），比文字档鲜一点；选中行整行
+                # 反白，这时候不画轨道，否则轨道的灰会在反白底上开个洞。
                 if used >= 0.95:
-                    bar_attr = color(CP_CRIT, bold=True)
+                    bar_attr = color(CP_CRIT_BAR)
                 elif used >= 0.85:
-                    bar_attr = color(CP_WARN)
+                    bar_attr = color(CP_WARN_BAR)
                 else:
-                    bar_attr = color(CP_OK)
-                safe_addstr(win, y, x, hbar(s.value, s.upper_crit, bar_width),
-                            base if selected else bar_attr)
+                    bar_attr = color(CP_OK_BAR)
+                if selected:
+                    safe_addstr(win, y, x,
+                                pad(hbar(s.value, s.upper_crit, bar_width),
+                                    bar_width), base)
+                else:
+                    draw_bar(win, y, x, s.value, s.upper_crit, bar_width, bar_attr)
                 safe_addstr(win, y, x + bar_width + 1, rpad(f"{headroom:+.0f}", 4),
                             base if selected else color(CP_DIM))
 
         # ---- summary bar ----
         y = height - 3
-        draw_box(win, y, 0, 3, width, "", color(CP_DIM))
+        draw_box(win, y, 0, 3, width, "", color(CP_BORDER))
         readable = [s for s in all_sensors if s.readable]
         temps = [s for s in readable if s.kind == "temperature"]
         fans = [s for s in readable if s.kind == "fan"]

@@ -25,12 +25,14 @@ from .views.tariff import TariffView
 from .views.users import UsersView
 from .widgets import (
     CP_ACCENT,
+    CP_BORDER,
     CP_CRIT,
     CP_DIM,
     CP_HEADER,
     CP_HIGHLIGHT,
     CP_NORMAL,
     CP_OK,
+    CP_SURFACE,
     CP_TITLE,
     CP_WARN,
     Prompt,
@@ -38,6 +40,7 @@ from .widgets import (
     confirm,
     cwidth,
     init_colors,
+    paint_background,
     pad,
     safe_addstr,
     show_message,
@@ -152,6 +155,7 @@ class App:
         stdscr.nodelay(True)
         stdscr.keypad(True)
         init_colors()
+        paint_background(stdscr)
 
         self.views = [
             OverviewView(self),
@@ -195,6 +199,7 @@ class App:
         stdscr = self.stdscr
         height, width = stdscr.getmaxyx()
         stdscr.erase()
+        # 视图画在 derwin 上，derwin 不继承父窗口的 bkgd，得自己刷一次。
 
         if height < 12 or width < MIN_WIDTH:
             safe_addstr(stdscr, 0, 0,
@@ -207,6 +212,7 @@ class App:
 
         content_h = height - 4
         content = stdscr.derwin(content_h, width, 2, 0)
+        paint_background(content)
         try:
             self.views[self.active].draw(content, content_h, width)
         except curses.error:
@@ -220,29 +226,39 @@ class App:
         host = self.config.ipmi.host or "本机"
         fru = self.data.fru or {}
         product = fru.get("Product Name", "")
-        title = f" pve-power  {product} @ {host} "
-        safe_addstr(stdscr, 0, 0, pad(title, width), color(CP_HEADER, bold=True))
+        # 整行先铺满主色，再往上写字：只写字的话右边剩下的格子是背景色，
+        # 色带会断在标题末尾。
+        safe_addstr(stdscr, 0, 0, " " * width, color(CP_HEADER))
+        safe_addstr(stdscr, 0, 1, truncate(f"pve-power  {product} @ {host}",
+                                           width - 2),
+                    color(CP_HEADER, bold=True))
 
         watts = self.data.current_watts()
         if watts is not None:
-            badge = f" {watts:.0f} W  今日 {self.data.today.cost:.2f} " \
+            badge = f" {watts:.0f} W │ 今日 {self.data.today.cost:.2f} " \
                     f"{self.config.tariff.currency} "
             safe_addstr(stdscr, 0, max(0, width - cwidth(badge) - 1), badge,
                         color(CP_HEADER, bold=True))
 
+        # 标签行：选中项反白成一枚实心标签，其余留在背景上。原来非选中项
+        # 用的是 CP_DIM（蓝），跟数据色同族，一眼看不出哪个是当前页。
+        safe_addstr(stdscr, 1, 0, " " * width, color(CP_NORMAL))
         x = 0
         for idx, view in enumerate(self.views):
             label = f" {idx + 1}:{view.title} "
             # 宽度不够时整块跳过，而不是画一半再被裁掉
             if x + cwidth(label) > width - 1:
                 break
-            attr = color(CP_HIGHLIGHT, bold=True) if idx == self.active else color(CP_DIM)
+            if idx == self.active:
+                attr = color(CP_HIGHLIGHT, bold=True)
+            else:
+                attr = color(CP_DIM)
             safe_addstr(stdscr, 1, x, label, attr)
             x += cwidth(label)
 
     def _draw_footer(self, stdscr, height: int, width: int) -> None:
         y = height - 2
-        safe_addstr(stdscr, y, 0, "─" * width, color(CP_DIM))
+        safe_addstr(stdscr, y, 0, "─" * width, color(CP_BORDER))
         if self._flash and time.time() < self._flash_until:
             attr = color(CP_OK, bold=True) if self._flash_ok else color(CP_CRIT, bold=True)
             safe_addstr(stdscr, y + 1, 1, truncate(self._flash, width - 2), attr)
@@ -256,12 +272,14 @@ class App:
                 if pair[0] not in seen] + keys
         x = 1
         for key, label in keys:
-            if x + cwidth(key) + cwidth(label) + 3 >= width:
+            if x + cwidth(key) + cwidth(label) + 4 >= width:
                 break
-            safe_addstr(stdscr, y + 1, x, key, color(CP_ACCENT, bold=True))
+            # 键名反白成小色块，标签留常规色：页脚一排全是同色文字时，
+            # 「按哪个键」和「它干什么」在视觉上是糊在一起的。
+            safe_addstr(stdscr, y + 1, x, key, color(CP_HIGHLIGHT, bold=True))
             x += cwidth(key)
-            safe_addstr(stdscr, y + 1, x, f":{label}  ", color(CP_DIM))
-            x += cwidth(label) + 3
+            safe_addstr(stdscr, y + 1, x, f" {label}   ", color(CP_DIM))
+            x += cwidth(label) + 4
 
         clock = dt.datetime.now().strftime("%H:%M:%S")
         safe_addstr(stdscr, y + 1, max(0, width - len(clock) - 1), clock,

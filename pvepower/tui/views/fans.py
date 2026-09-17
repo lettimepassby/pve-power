@@ -13,13 +13,19 @@ from ..widgets import (
     CP_OK,
     CP_TITLE,
     CP_WARN,
+    CP_CRIT_BAR,
+    CP_WARN_BAR,
+    CP_OK_BAR,
     color,
+    draw_bar,
     cwidth,
-    draw_box,
     hbar,
+    highlight_row,
     pad,
+    panel,
     rpad,
     safe_addstr,
+    table_header,
     show_message,
     truncate,
 )
@@ -83,18 +89,17 @@ class FansView(View):
         missing = [f for f in fans if not f.present]
 
         list_h = max(6, height - 8)
-        draw_box(win, 0, 0, list_h, width, "风扇转速",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, list_h, width, "风扇转速")
 
         if not fans:
             safe_addstr(win, 2, 2, "正在读取传感器…（首次进入约需 5 秒）",
                         color(CP_DIM))
         else:
-            safe_addstr(
+            table_header(
                 win, 1, 2,
-                pad(pad("风扇", 14) + rpad("转速", 10) + "  "
-                    + pad("状态", 8) + "占空比（按额定转速折算）", width - 4),
-                color(CP_DIM, bold=True),
+                pad("风扇", 14) + rpad("转速", 10) + "  "
+                + pad("状态", 8) + "占空比（按额定转速折算）",
+                width - 4,
             )
 
             reference = self._reference_rpm(fans)
@@ -110,6 +115,8 @@ class FansView(View):
                 fan = fans[idx]
                 y = 2 + i
                 selected = idx == self.cursor
+                if selected:
+                    highlight_row(win, y, 1, width - 2)
                 base = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
 
                 position = POSITION_LABELS.get(fan.position, fan.position)
@@ -137,20 +144,23 @@ class FansView(View):
                 percent = fan.percent_of(reference) or 0.0
                 bar_width = max(8, width - x - 10)
                 if percent >= 85:
-                    bar_attr = color(CP_CRIT, bold=True)
+                    bar_attr = color(CP_CRIT_BAR)
                 elif percent >= 60:
-                    bar_attr = color(CP_WARN)
+                    bar_attr = color(CP_WARN_BAR)
                 else:
-                    bar_attr = color(CP_OK)
-                safe_addstr(win, y, x, hbar(percent, 100.0, bar_width),
-                            base if selected else bar_attr)
+                    bar_attr = color(CP_OK_BAR)
+                if selected:
+                    safe_addstr(win, y, x,
+                                pad(hbar(percent, 100.0, bar_width), bar_width),
+                                base)
+                else:
+                    draw_bar(win, y, x, percent, 100.0, bar_width, bar_attr)
                 safe_addstr(win, y, x + bar_width + 1, rpad(f"{percent:.0f}%", 5),
                             base if selected else color(CP_DIM))
 
         # ---- 调速能力面板 ----
         y = list_h
-        draw_box(win, y, 0, height - list_h, width, "手动调速",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, 0, height - list_h, width, "手动调速")
 
         control = self.data.fan_control
         if control is None:

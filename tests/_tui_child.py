@@ -73,7 +73,8 @@ def main() -> int:
 
     # Fill the cache synchronously: a draw must never depend on a
     # background refresh having landed.
-    for kind in ("power", "sensors", "chassis", "identity", "lan", "users", "sel"):
+    for kind in ("power", "sensors", "chassis", "identity", "lan", "users",
+                 "sel", "fan_control"):
         value = app.data._fetch(kind)
         if value is not None:
             app.data._values[kind] = value
@@ -84,6 +85,7 @@ def main() -> int:
     def body(stdscr):
         from pvepower.tui.views.bmc import BmcView
         from pvepower.tui.views.energy import EnergyView
+        from pvepower.tui.views.fans import FansView
         from pvepower.tui.views.overview import OverviewView
         from pvepower.tui.views.sel import SelView
         from pvepower.tui.views.sensors import SensorsView
@@ -95,8 +97,8 @@ def main() -> int:
         init_colors()
         app.stdscr = stdscr
         app.views = [
-            OverviewView(app), EnergyView(app), SensorsView(app), BmcView(app),
-            UsersView(app), SelView(app), TariffView(app),
+            OverviewView(app), EnergyView(app), SensorsView(app), FansView(app),
+            BmcView(app), UsersView(app), SelView(app), TariffView(app),
         ]
         for idx, view in enumerate(app.views):
             app.active = idx

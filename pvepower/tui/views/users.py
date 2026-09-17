@@ -12,6 +12,7 @@ import curses
 from ...ipmi import IpmiError
 from ..widgets import (
     CP_ACCENT,
+    CP_BORDER,
     CP_CRIT,
     CP_DIM,
     CP_HIGHLIGHT,
@@ -25,8 +26,11 @@ from ..widgets import (
     confirm,
     cwidth,
     draw_box,
+    highlight_row,
     pad,
+    panel,
     safe_addstr,
+    table_header,
     show_message,
     truncate,
 )
@@ -77,17 +81,16 @@ class UsersView(View):
     def draw(self, win, height: int, width: int) -> None:
         users = self.visible_users()
         channel = self.app.config.ipmi.lan_channel
-        draw_box(win, 0, 0, height - 4, width, f"BMC 用户 — 通道 {channel}",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, height - 4, width, f"BMC 用户 — 通道 {channel}")
         # pad() counts terminal columns; an f-string's :<n> counts characters
         # and would misalign every column after a Chinese one.
-        safe_addstr(
+        table_header(
             win, 1, 2,
-            pad(pad("ID", COL_UID) + pad("用户名", COL_NAME)
-                + pad("权限", COL_PRIV) + pad("IPMI 消息", COL_MSG)
-                + pad("链路认证", COL_LINK) + pad("回拨", COL_CALLIN)
-                + "备注", width - 4),
-            color(CP_DIM, bold=True),
+            pad("ID", COL_UID) + pad("用户名", COL_NAME)
+            + pad("权限", COL_PRIV) + pad("IPMI 消息", COL_MSG)
+            + pad("链路认证", COL_LINK) + pad("回拨", COL_CALLIN)
+            + "备注",
+            width - 4,
         )
 
         visible = height - 7
@@ -102,6 +105,8 @@ class UsersView(View):
             u = users[idx]
             y = 2 + i
             selected = idx == self.cursor
+            if selected:
+                highlight_row(win, y, 1, width - 2)
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             name = u.name if u.name else "（空槽位）"
             line = (
@@ -134,7 +139,7 @@ class UsersView(View):
 
     def _draw_footer(self, win, height, width, users):
         y = height - 4
-        draw_box(win, y, 0, 4, width, "", color(CP_DIM))
+        draw_box(win, y, 0, 4, width, "", color(CP_BORDER))
         active = [u for u in users if not u.empty]
         admins = [u for u in active if u.privilege == "ADMINISTRATOR"]
         risky = [

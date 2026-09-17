@@ -14,12 +14,15 @@ from ..widgets import (
     CP_TITLE,
     CP_WARN,
     color,
+    draw_bar,
     cwidth,
-    draw_box,
     hbar,
+    highlight_row,
     pad,
+    panel,
     rpad,
     safe_addstr,
+    table_header,
     truncate,
 )
 from .base import View
@@ -57,8 +60,7 @@ class EnergyView(View):
         cur = self.app.config.tariff.currency
         series = self.data.daily_series(self.days)
         header = f"按天用电量：最近 {self.days} 天"
-        draw_box(win, 0, 0, height - 6, width, header,
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, height - 6, width, header)
 
         cols = (
             pad("日期", 12)
@@ -66,8 +68,7 @@ class EnergyView(View):
             + rpad("电费", 10) + "  "
             + rpad("平均功率", 9) + "  "
         )
-        safe_addstr(win, 1, 2, pad(cols + "趋势", width - 4),
-                    color(CP_DIM, bold=True))
+        table_header(win, 1, 2, cols + "趋势", width - 4)
 
         visible = height - 9
         total = len(series)
@@ -80,9 +81,11 @@ class EnergyView(View):
             if idx >= total:
                 break
             agg = series[idx]
-            selected = idx == self.cursor
-            attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             y = 2 + i
+            selected = idx == self.cursor
+            if selected:
+                highlight_row(win, y, 1, width - 2)
+            attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             line = (
                 f"{pad(agg.label, 12)}"
                 f"{rpad(f'{agg.kwh:.3f}', 9)}  "
@@ -91,9 +94,8 @@ class EnergyView(View):
             )
             safe_addstr(win, y, 2, pad(line, min(cwidth(line), width - 4)), attr)
             if not selected and agg.kwh:
-                safe_addstr(win, y, 2 + cwidth(line),
-                            hbar(agg.kwh, peak, bar_width),
-                            color(CP_ACCENT))
+                draw_bar(win, y, 2 + cwidth(line), agg.kwh, peak, bar_width,
+                         color(CP_ACCENT))
             elif selected:
                 safe_addstr(win, y, 2 + cwidth(line),
                             pad(hbar(agg.kwh, peak, bar_width), bar_width), attr)
@@ -105,8 +107,7 @@ class EnergyView(View):
         total_cost = sum(a.cost for a in series)
         active = [a for a in series if a.kwh > 0]
         y = height - 5
-        draw_box(win, y, 0, 5, width, "合计",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, 0, 5, width, "合计")
         safe_addstr(win, y + 1, 2,
                     f"{len(series)} 天：{total_kwh:.2f} kWh   "
                     f"{total_cost:.2f} {cur}",
@@ -135,14 +136,12 @@ class EnergyView(View):
         cur = self.app.config.tariff.currency
         series = self.data.hourly_series(self.day)
         header = f"按小时用电量：{self.day.isoformat()}"
-        draw_box(win, 0, 0, height - 6, width, header,
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
-        safe_addstr(
+        panel(win, 0, 0, height - 6, width, header)
+        table_header(
             win, 1, 2,
-            pad(pad("时段", 8) + rpad("电量/kWh", 8) + "  "
-                + rpad("电费", 9) + "  " + rpad("平均功率", 9) + "  趋势",
-                width - 4),
-            color(CP_DIM, bold=True),
+            pad("时段", 8) + rpad("电量/kWh", 8) + "  "
+            + rpad("电费", 9) + "  " + rpad("平均功率", 9) + "  趋势",
+            width - 4,
         )
 
         peak = max((a.kwh for a in series), default=0.0) or 1.0
@@ -154,6 +153,8 @@ class EnergyView(View):
             agg = series[i]
             y = 2 + i
             selected = i == self.cursor
+            if selected:
+                highlight_row(win, y, 1, width - 2)
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             line = (
                 f"{pad(agg.label, 8)}"
@@ -163,12 +164,15 @@ class EnergyView(View):
             )
             safe_addstr(win, y, 2, line, attr)
             if agg.kwh:
-                safe_addstr(win, y, 2 + cwidth(line), hbar(agg.kwh, peak, bar_width),
-                            color(CP_ACCENT) if not selected else attr)
+                if selected:
+                    safe_addstr(win, y, 2 + cwidth(line),
+                                pad(hbar(agg.kwh, peak, bar_width), bar_width), attr)
+                else:
+                    draw_bar(win, y, 2 + cwidth(line), agg.kwh, peak, bar_width,
+                             color(CP_ACCENT))
 
         y = height - 5
-        draw_box(win, y, 0, 5, width, "分时电价明细",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, 0, 5, width, "分时电价明细")
         start = dt.datetime.combine(self.day, dt.time.min)
         end = start + dt.timedelta(days=1) - dt.timedelta(seconds=1)
         rows = self.data.period_breakdown(start, end)

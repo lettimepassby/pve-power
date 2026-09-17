@@ -29,8 +29,9 @@ from ..widgets import (
     color,
     confirm,
     cwidth,
-    draw_box,
+    highlight_row,
     pad,
+    panel,
     safe_addstr,
     show_message,
     status_attr,
@@ -136,8 +137,7 @@ class BmcView(View):
         self._draw_chassis(win, 11, 0, height - 11, width)
 
     def _draw_identity(self, win, y, x, h, w):
-        draw_box(win, y, x, h, w, "BMC 信息",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "BMC 信息")
         mc = self.data.mc_info or {}
         fru = self.data.fru or {}
         items = [
@@ -160,8 +160,7 @@ class BmcView(View):
     def _draw_lan(self, win, y, x, h, w):
         lan = self.data.lan_config
         channel = lan.channel if lan else self.app.config.ipmi.lan_channel
-        draw_box(win, y, x, h, w, f"LAN — 通道 {channel}",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, f"LAN — 通道 {channel}")
         if not lan:
             safe_addstr(win, y + 2, x + 2, "LAN 配置不可用",
                         color(CP_CRIT))
@@ -172,6 +171,8 @@ class BmcView(View):
             if row >= y + h - 2:
                 break
             selected = i == self.cursor
+            if selected:
+                highlight_row(win, row, x + 1, w - 2)
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             safe_addstr(win, row, x + 2, pad(label, 15),
                         attr if selected else color(CP_DIM))
@@ -182,8 +183,7 @@ class BmcView(View):
             safe_addstr(win, mac_row, x + 18, lan.mac, color(CP_ACCENT))
 
     def _draw_chassis(self, win, y, x, h, w):
-        draw_box(win, y, x, h, w, "机箱与电源控制",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "机箱与电源控制")
         chassis = self.data.chassis_status or {}
         line = y + 1
         left = [

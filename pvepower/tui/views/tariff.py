@@ -30,11 +30,12 @@ from ..widgets import (
     color,
     confirm,
     cwidth,
-    draw_box,
-    hbar,
+    highlight_row,
     pad,
+    panel,
     rpad,
     safe_addstr,
+    table_header,
     show_message,
     truncate,
 )
@@ -129,13 +130,14 @@ class TariffView(View):
         half = width // 2
 
         rows = self._rows()
-        draw_box(win, 0, 0, 11, half, "设置",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, 11, half, "设置")
         for i, (_, label, value) in enumerate(rows):
             y = 1 + i
             if y >= 10:
                 break
             selected = i == self.cursor
+            if selected:
+                highlight_row(win, y, 1, half - 2)
             attr = color(CP_HIGHLIGHT) if selected else color(CP_NORMAL)
             safe_addstr(win, y, 2, pad(label, 22),
                         attr if selected else color(CP_DIM))
@@ -143,8 +145,7 @@ class TariffView(View):
                         attr)
 
         # ---- current price ----
-        draw_box(win, 0, half, 11, width - half, "当前电价",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, half, 11, width - half, "当前电价")
         now = dt.datetime.now()
         mtd = self.data.month.kwh
         price = t.price_at(now, mtd)
@@ -183,8 +184,7 @@ class TariffView(View):
 
     def _draw_tou(self, win, y, x, h, w):
         t = self.app.config.tariff
-        draw_box(win, y, x, h, w, "分时电价时段表",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "分时电价时段表")
         if not t.tou_periods:
             safe_addstr(win, y + 2, x + 2,
                         "尚未定义任何时段。按 P 载入示例的中国分时电价方案，"
@@ -194,10 +194,9 @@ class TariffView(View):
 
         # 列宽（终端列，不是字符数）：时段名 14 + 电价 12 + 间隔 2 +
         # 小时 30 + 星期 14 = 58，与下方的阶梯电价表共用同一套列宽。
-        safe_addstr(win, y + 1, x + 2,
-                    pad(pad("时段", 14) + rpad("电价", 12) + "  "
-                        + pad("覆盖小时", 30) + "星期", w - 4),
-                    color(CP_DIM, bold=True))
+        table_header(win, y + 1, x + 2,
+                     pad("时段", 14) + rpad("电价", 12) + "  "
+                     + pad("覆盖小时", 30) + "星期", w - 4)
         line = y + 2
         for period in t.tou_periods:
             if line >= y + h - 4:
@@ -248,8 +247,7 @@ class TariffView(View):
 
     def _draw_tiers(self, win, y, x, h, w):
         t = self.app.config.tariff
-        draw_box(win, y, x, h, w, "阶梯电价（按本月累计电量分档）",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "阶梯电价（按本月累计电量分档）")
         if not t.tiered_enabled:
             safe_addstr(win, y + 2, x + 2,
                         "阶梯电价当前是关闭的。选中上方的“阶梯电价”并按 Enter，"
@@ -260,10 +258,9 @@ class TariffView(View):
                         "阶梯电价已启用，但尚未定义任何阶梯 —— 按 a 添加一个。",
                         color(CP_WARN))
         else:
-            safe_addstr(win, y + 1, x + 2,
-                        pad(pad("阶梯", 14) + rpad("上限（kWh）", 16)
-                            + rpad("加价", 14) + rpad("生效电价", 14), w - 4),
-                        color(CP_DIM, bold=True))
+            table_header(win, y + 1, x + 2,
+                         pad("阶梯", 14) + rpad("上限（kWh）", 16)
+                         + rpad("加价", 14) + rpad("生效电价", 14), w - 4)
             line = y + 2
             mtd = self.data.month.kwh
             for tier in t.tiers:

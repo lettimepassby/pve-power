@@ -13,11 +13,11 @@ from ..widgets import (
     CP_TITLE,
     CP_WARN,
     color,
+    draw_bar,
     cwidth,
-    draw_box,
-    hbar,
     humanize_ago,
     pad,
+    panel,
     rpad,
     safe_addstr,
     sparkline,
@@ -39,8 +39,7 @@ class OverviewView(View):
         reading = self.data.power_reading
         watts = reading.instantaneous if reading and reading.valid else None
         box_h = 8
-        draw_box(win, 0, 0, box_h, width, "实时功率",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, 0, 0, box_h, width, "实时功率")
 
         if watts is None:
             safe_addstr(win, 2, 2, "无法从 BMC 读取功率",
@@ -64,8 +63,7 @@ class OverviewView(View):
             ceiling = max(reading.maximum or 0, watts, 1)
             bar_width = max(10, width - 24)
             safe_addstr(win, 3, 2, "负载 ", color(CP_DIM))
-            safe_addstr(win, 3, 7, hbar(watts, ceiling, bar_width),
-                        color(CP_ACCENT))
+            draw_bar(win, 3, 7, watts, ceiling, bar_width, color(CP_ACCENT))
             safe_addstr(win, 3, 7 + bar_width + 1, f"{watts / ceiling * 100:3.0f}%",
                         color(CP_DIM))
 
@@ -98,8 +96,7 @@ class OverviewView(View):
             self._draw_health(win, row, 0, remaining, width)
 
     def _draw_consumption(self, win, y, x, h, w, cur) -> None:
-        draw_box(win, y, x, h, w, "用电量",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "用电量")
         today = self.data.today
         month = self.data.month
         rows = [
@@ -132,8 +129,7 @@ class OverviewView(View):
                         color(CP_DIM))
 
     def _draw_status(self, win, y, x, h, w, ) -> None:
-        draw_box(win, y, x, h, w, "机器信息",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "机器信息")
         chassis = self.data.chassis_status or {}
         fru = self.data.fru or {}
         line = y + 2
@@ -169,8 +165,7 @@ class OverviewView(View):
                             color(CP_OK))
 
     def _draw_health(self, win, y, x, h, w) -> None:
-        draw_box(win, y, x, h, w, "采集器",
-                 color(CP_TITLE), color(CP_TITLE, bold=True))
+        panel(win, y, x, h, w, "采集器")
         stats = self.data.storage_stats
         line = y + 2
         last = self.data.last_sample
